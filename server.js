@@ -40,7 +40,8 @@ async function start() {
     await ensureSchema();
     console.log('Database schema ready.');
   } catch (err) {
-    console.error('Failed to prepare database schema:', err.message);
+    console.error('Failed to prepare database schema:', err.message || err.code || String(err));
+    if (err.stack) console.error(err.stack);
     process.exit(1);
   }
   app.listen(PORT, HOST, () => {
