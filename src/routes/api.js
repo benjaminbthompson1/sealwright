@@ -33,7 +33,7 @@ async function loadPages(envelopeId) {
 }
 
 async function addAudit(envelopeId, text) {
-  await pool.query('INSERT INTO audit_log (envelope_id, text) VALUES ($1,$2)', [envelopeId, text]);
+  await pool.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), envelopeId, text]);
 }
 
 function emailHtml(bodyLines) {
@@ -106,19 +106,19 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
     }
 
     await client.query('BEGIN');
+    const envelopeId = crypto.randomUUID();
     const envRes = await client.query(
-      `INSERT INTO envelopes (title, source_type, file_name, mime_type, original_bytes, plain_text, sequential, current_turn_index, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,1,'sent') RETURNING id, created_at`,
-      [title, sourceType, fileName, mimeType, originalBytes, plainText, sequential]
+      `INSERT INTO envelopes (id, title, source_type, file_name, mime_type, original_bytes, plain_text, sequential, current_turn_index, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,'sent') RETURNING id, created_at`,
+      [envelopeId, title, sourceType, fileName, mimeType, originalBytes, plainText, sequential]
     );
-    const envelopeId = envRes.rows[0].id;
 
     if (sourceType === 'image') {
       let idx = 0;
       for (const f of pageFiles) {
         await client.query(
-          'INSERT INTO envelope_pages (envelope_id, page_index, mime_type, image_bytes) VALUES ($1,$2,$3,$4)',
-          [envelopeId, idx++, f.mimetype, f.buffer]
+          'INSERT INTO envelope_pages (id, envelope_id, page_index, mime_type, image_bytes) VALUES ($1,$2,$3,$4,$5)',
+          [crypto.randomUUID(), envelopeId, idx++, f.mimetype, f.buffer]
         );
       }
     }
@@ -128,14 +128,14 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
     for (const s of signers) {
       const token = genToken();
       const r = await client.query(
-        `INSERT INTO signers (envelope_id, name, email, order_index, status, sign_token)
-         VALUES ($1,$2,$3,$4,'pending',$5) RETURNING *`,
-        [envelopeId, s.name.trim(), s.email.trim(), orderIdx++, token]
+        `INSERT INTO signers (id, envelope_id, name, email, order_index, status, sign_token)
+         VALUES ($1,$2,$3,$4,$5,'pending',$6) RETURNING *`,
+        [crypto.randomUUID(), envelopeId, s.name.trim(), s.email.trim(), orderIdx++, token]
       );
       insertedSigners.push(r.rows[0]);
     }
 
-    await client.query('INSERT INTO audit_log (envelope_id, text) VALUES ($1, $2)', [envelopeId, 'Envelope created and sent for signature.']);
+    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), envelopeId, 'Envelope created and sent for signature.']);
     await client.query('COMMIT');
 
     const toEmail = sequential ? [insertedSigners[0]] : insertedSigners;
@@ -276,7 +276,7 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
       `UPDATE signers SET status='signed', signed_at=now(), signature_bytes=$1, signature_mime=$2, method=$3 WHERE id=$4`,
       [req.file.buffer, req.file.mimetype, req.body.method || 'drawn', signer.id]
     );
-    await client.query('INSERT INTO audit_log (envelope_id, text) VALUES ($1,$2)', [env.id, `${signer.name} signed via ${req.body.method || 'electronic signature'}.`]);
+    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, `${signer.name} signed via ${req.body.method || 'electronic signature'}.`]);
 
     let nextTurnIndex = env.current_turn_index;
     if (env.sequential && signer.order_index === env.current_turn_index) {
@@ -289,7 +289,7 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
 
     if (allSigned) {
       await client.query(`UPDATE envelopes SET status='completed', completed_at=now() WHERE id=$1`, [env.id]);
-      await client.query('INSERT INTO audit_log (envelope_id, text) VALUES ($1,$2)', [env.id, 'All parties signed. Document executed.']);
+      await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, 'All parties signed. Document executed.']);
     }
     await client.query('COMMIT');
 
