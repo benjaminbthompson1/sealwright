@@ -55,20 +55,20 @@ router.post('/logout', (req, res) => {
 
 router.get('/', requireAuth, (req, res) => {
   res.send(shell('Dashboard', `<div id="app"></div>`, `
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
-    <script src="/common.js"></script>
-    <script src="/dashboard.js"></script>`));
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script defer src="/common.js"></script>
+    <script defer src="/dashboard.js"></script>`));
 });
 
 router.get('/sign/:token', (req, res) => {
   res.send(shell('Sign document', `<div id="app"></div>`, `
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
-    <script src="/common.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script defer src="/common.js"></script>
     <script>window.SIGN_TOKEN=${JSON.stringify(req.params.token)};</script>
-    <script src="/sign.js"></script>`));
+    <script defer src="/sign.js"></script>`));
 });
 
 module.exports = router;
