@@ -26,10 +26,11 @@ app.use(sessionMiddleware());
 app.use(express.json());
 
 app.use('/api', (req, res, next) => {
-  // dashboard-only writes require a session; envelope creation is the one write route
-  // that must come from the authenticated sender.
+  // dashboard-only writes require a session; envelope creation and deletion are
+  // the write routes that must come from the authenticated sender, never a signer's token.
   if (req.method === 'POST' && req.path === '/envelopes') return requireAuth(req, res, next);
   if (req.method === 'GET' && req.path === '/envelopes') return requireAuth(req, res, next);
+  if (req.method === 'DELETE' && /^\/envelopes\/[^/]+$/.test(req.path)) return requireAuth(req, res, next);
   next();
 });
 app.use('/api', apiRouter);
