@@ -198,6 +198,19 @@ router.get('/envelopes/:id', async (req, res) => {
   });
 });
 
+// ---------- delete (sender only — gated by session in server.js's /api middleware) ----------
+router.delete('/envelopes/:id', async (req, res) => {
+  if (!req.session || !req.session.authed) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Not found' });
+  // ON DELETE CASCADE on signers, envelope_pages, and audit_log means this one
+  // statement removes the whole envelope and everything tied to it, including
+  // every stored document byte, signature image, and the audit trail itself.
+  await pool.query('DELETE FROM envelopes WHERE id=$1', [env.id]);
+  console.log(`Envelope deleted: ${env.id} ("${env.title}")`);
+  res.json({ deleted: true });
+});
+
 // ---------- file / page / signature serving ----------
 router.get('/envelopes/:id/file', async (req, res) => {
   const ok = await resolveAccess(req, req.params.id);
