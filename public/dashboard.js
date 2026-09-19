@@ -324,6 +324,10 @@
       <div class="doc-preview" id="detailPreview" style="margin-top:18px;">${preview}</div>
       <h3 style="margin-top:26px; font-size:16px;">Signers</h3><div class="sig-block-panel">${rows}</div>
       ${completedBlock}<hr class="hr"><h3 style="font-size:16px;">Activity</h3><div class="audit-log">${auditRows}</div>
+      <hr class="hr">
+      <div id="deleteError" class="warn-text" style="display:none;"></div>
+      <button class="btn btn-danger btn-sm" id="btnDeleteEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete this envelope</button>
+      <p class="faint" style="margin-top:8px;">Permanently removes the document, every signature, and the activity log. This cannot be undone.</p>
     </div>`;
   }
 
@@ -354,6 +358,20 @@
       try { await navigator.clipboard.writeText(btn.getAttribute('data-copy')); btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy signing link', 1500); }
       catch (e) { prompt('Copy this link:', btn.getAttribute('data-copy')); }
     }));
+    const btnDelete = document.getElementById('btnDeleteEnvelope');
+    if (btnDelete) btnDelete.addEventListener('click', async () => {
+      const title = btnDelete.getAttribute('data-title');
+      if (!confirm(`Delete "${title}"? This permanently removes the document, all signatures, and the activity log. This cannot be undone.`)) return;
+      btnDelete.disabled = true; btnDelete.textContent = 'Deleting…';
+      try {
+        await api('/api/envelopes/' + btnDelete.getAttribute('data-id'), { method: 'DELETE' });
+        STATE.screen = 'list'; render();
+      } catch (e) {
+        const errBox = document.getElementById('deleteError');
+        errBox.textContent = e.message || 'Could not delete this envelope.'; errBox.style.display = 'block';
+        btnDelete.disabled = false; btnDelete.textContent = 'Delete this envelope';
+      }
+    });
   }
 
   window.addEventListener('click', (e) => {
