@@ -23,6 +23,24 @@ const LOGO_SVG = (size) => `<svg width="${size}" height="${size}" viewBox="0 0 1
   <rect x="54" y="54" width="26" height="26" rx="8" fill="#EAEEF7" opacity="0.9"/>
 </svg>`;
 
+const EYE_OPEN = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const EYE_OFF = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+
+// Renders a password input with a show/hide eye-icon button. The toggle script
+// lives once in shell() and wires up every .pw-toggle on the page — nothing
+// page-specific needed beyond using this helper.
+function passwordField(id, name, opts) {
+  opts = opts || {};
+  const extra = opts.minlength ? ` minlength="${opts.minlength}"` : '';
+  const autofocus = opts.autofocus ? ' autofocus' : '';
+  return `<div class="password-wrap">
+    <input type="password" id="${id}" name="${name}" required${extra}${autofocus}>
+    <button type="button" class="pw-toggle" data-target="${id}" aria-label="Show password">
+      <span class="icon-eye">${EYE_OPEN}</span><span class="icon-eye-off" style="display:none;">${EYE_OFF}</span>
+    </button>
+  </div>`;
+}
+
 function shell(title, bodyInner) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -33,6 +51,19 @@ function shell(title, bodyInner) {
   </head><body>
   <div class="bg-glow"></div><div class="bg-grid"></div>
   <div id="app">${bodyInner}</div>
+  <script>
+    document.addEventListener('click', function (e) {
+      var btn = e.target.closest('.pw-toggle');
+      if (!btn) return;
+      var input = document.getElementById(btn.getAttribute('data-target'));
+      if (!input) return;
+      var showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      btn.querySelector('.icon-eye').style.display = showing ? '' : 'none';
+      btn.querySelector('.icon-eye-off').style.display = showing ? 'none' : '';
+      btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+  </script>
   </body></html>`;
 }
 
@@ -110,7 +141,7 @@ router.get('/signup', (req, res) => {
         <div class="field"><label>Last name</label><input type="text" name="lastName" required value="${escapeHtml(q.lastName)}"></div>
         <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(q.email)}"></div>
         <div class="field"><label>Phone number</label><input type="tel" name="phone" required value="${escapeHtml(q.phone)}"></div>
-        <div class="field"><label>Password</label><input type="password" name="password" required minlength="8">
+        <div class="field"><label>Password</label>${passwordField('pw-signup', 'password', { minlength: 8 })}
           <div class="field-hint">At least 8 characters.</div>
         </div>
         <button class="btn btn-primary btn-block" type="submit">Create account</button>
@@ -165,7 +196,7 @@ router.get('/login', (req, res) => {
       ${req.query.reset ? `<div class="banner banner-success">Password updated — sign in with your new password.</div>` : ''}
       <form method="POST" action="/login">
         <div class="field"><label>Email</label><input type="email" name="email" required autofocus></div>
-        <div class="field"><label>Password</label><input type="password" name="password" required></div>
+        <div class="field"><label>Password</label>${passwordField('pw-login', 'password')}</div>
         <button class="btn btn-primary btn-block" type="submit">Sign in</button>
       </form>
       <div class="auth-foot">
@@ -282,7 +313,7 @@ router.get('/reset-password/:token', async (req, res) => {
       <p class="sub">For ${escapeHtml(user.email)}</p>
       ${req.query.err ? `<div class="banner banner-error">${escapeHtml(req.query.err)}</div>` : ''}
       <form method="POST" action="/reset-password/${req.params.token}">
-        <div class="field"><label>New password</label><input type="password" name="password" required minlength="8"></div>
+        <div class="field"><label>New password</label>${passwordField('pw-reset', 'password', { minlength: 8 })}</div>
         <button class="btn btn-primary btn-block" type="submit">Update password</button>
       </form>
     </div></div>`));
