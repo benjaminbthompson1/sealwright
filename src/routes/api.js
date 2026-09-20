@@ -5,6 +5,8 @@ const mammoth = require('mammoth');
 const { pool } = require('../db');
 const { sendMail } = require('../mailer');
 const { buildFinalPdf } = require('../pdf');
+const { findUserById } = require('../auth');
+const { signRequestEmail, completionEmail } = require('../emailTemplates');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -36,29 +38,24 @@ async function addAudit(envelopeId, text) {
   await pool.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), envelopeId, text]);
 }
 
-function emailHtml(bodyLines) {
-  return `<div style="font-family:sans-serif; font-size:14px; color:#1C2B3A;">${bodyLines.map(l => `<p>${l}</p>`).join('')}</div>`;
+async function senderDisplayName(ownerId) {
+  if (!ownerId) return null;
+  const owner = await findUserById(ownerId);
+  if (!owner) return null;
+  const name = [owner.first_name, owner.last_name].filter(Boolean).join(' ');
+  return name || null;
 }
 
-async function emailSignerTurn(req, envelope, signer) {
+async function emailSignerTurn(req, envelope, signer, senderName) {
   const link = `${baseUrl(req)}/sealwright/sign/${signer.sign_token}`;
-  await sendMail({
-    to: signer.email,
-    subject: `Please sign: ${envelope.title}`,
-    text: `You've been asked to sign "${envelope.title}". Open this link to review and sign: ${link}`,
-    html: emailHtml([
-      `You've been asked to sign <strong>${envelope.title}</strong>.`,
-      `<a href="${link}">Open the document and sign</a>`
-    ])
-  });
+  const t = signRequestEmail({ signerName: signer.name, envelopeTitle: envelope.title, senderName, signUrl: link });
+  await sendMail({ to: signer.email, subject: t.subject, text: t.text, html: t.html });
 }
 
-async function emailCompletion(req, envelope, signer, pdfBuffer) {
+async function emailCompletion(req, envelope, signer, pdfBuffer, fingerprint) {
+  const t = completionEmail({ signerName: signer.name, envelopeTitle: envelope.title, fingerprint });
   await sendMail({
-    to: signer.email,
-    subject: `Completed: ${envelope.title}`,
-    text: `All parties have signed "${envelope.title}". The executed document is attached.`,
-    html: emailHtml([`All parties have signed <strong>${envelope.title}</strong>. The executed document is attached.`]),
+    to: signer.email, subject: t.subject, text: t.text, html: t.html,
     attachments: [{ filename: `${envelope.title} - executed.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
   });
 }
@@ -139,8 +136,11 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
     await client.query('COMMIT');
 
     const toEmail = sequential ? [insertedSigners[0]] : insertedSigners;
-    for (const s of toEmail) {
-      emailSignerTurn(req, { title }, s).catch(e => console.error('email failed', e.message));
+    if (toEmail.length) {
+      const senderName = await senderDisplayName(req.session.userId);
+      for (const s of toEmail) {
+        emailSignerTurn(req, { title }, s, senderName).catch(e => console.error('email failed', e.message));
+      }
     }
 
     res.json({ id: envelopeId });
@@ -320,7 +320,7 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
         const { bytes, fingerprint } = await buildFinalPdf(freshEnv, pages, signers);
         await pool.query('UPDATE envelopes SET final_pdf_bytes=$1, fingerprint=$2 WHERE id=$3', [bytes, fingerprint, env.id]);
         for (const s of signers) {
-          emailCompletion(req, freshEnv, s, bytes).catch(e => console.error('completion email failed', e.message));
+          emailCompletion(req, freshEnv, s, bytes, fingerprint).catch(e => console.error('completion email failed', e.message));
         }
       } catch (err) {
         console.error('final pdf assembly failed', err);
@@ -329,7 +329,10 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
       return res.json({ status: 'signed', allSigned: true });
     } else if (env.sequential) {
       const nextSigner = (await loadSigners(env.id)).find(s => s.order_index === nextTurnIndex);
-      if (nextSigner) emailSignerTurn(req, env, nextSigner).catch(e => console.error('email failed', e.message));
+      if (nextSigner) {
+        const senderName = await senderDisplayName(env.owner_id);
+        emailSignerTurn(req, env, nextSigner, senderName).catch(e => console.error('email failed', e.message));
+      }
     }
 
     res.json({ status: 'signed', allSigned: false });
