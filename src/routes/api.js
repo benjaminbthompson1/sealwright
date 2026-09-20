@@ -41,7 +41,7 @@ function emailHtml(bodyLines) {
 }
 
 async function emailSignerTurn(req, envelope, signer) {
-  const link = `${baseUrl(req)}/sign/${signer.sign_token}`;
+  const link = `${baseUrl(req)}/sealwright/sign/${signer.sign_token}`;
   await sendMail({
     to: signer.email,
     subject: `Please sign: ${envelope.title}`,
@@ -108,9 +108,9 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
     await client.query('BEGIN');
     const envelopeId = crypto.randomUUID();
     const envRes = await client.query(
-      `INSERT INTO envelopes (id, title, source_type, file_name, mime_type, original_bytes, plain_text, sequential, current_turn_index, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,'sent') RETURNING id, created_at`,
-      [envelopeId, title, sourceType, fileName, mimeType, originalBytes, plainText, sequential]
+      `INSERT INTO envelopes (id, owner_id, title, source_type, file_name, mime_type, original_bytes, plain_text, sequential, current_turn_index, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'sent') RETURNING id, created_at`,
+      [envelopeId, req.session.userId, title, sourceType, fileName, mimeType, originalBytes, plainText, sequential]
     );
 
     if (sourceType === 'image') {
@@ -155,7 +155,7 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
 
 // ---------- list ----------
 router.get('/envelopes', async (req, res) => {
-  const envs = await pool.query('SELECT id, title, status, sequential, current_turn_index, created_at FROM envelopes ORDER BY created_at DESC');
+  const envs = await pool.query('SELECT id, title, status, sequential, current_turn_index, created_at FROM envelopes WHERE owner_id=$1 ORDER BY created_at DESC', [req.session.userId]);
   const out = [];
   for (const e of envs.rows) {
     const signers = await pool.query('SELECT id, name, email, status, order_index FROM signers WHERE envelope_id=$1 ORDER BY order_index', [e.id]);
@@ -164,21 +164,26 @@ router.get('/envelopes', async (req, res) => {
   res.json(out);
 });
 
-// ---------- detail (session OR token) ----------
+// ---------- detail (owner via session OR a signer via their own token) ----------
 async function resolveAccess(req, envelopeId) {
-  if (req.session && req.session.authed) return true;
+  if (req.session && req.session.userId) {
+    const r = await pool.query('SELECT 1 FROM envelopes WHERE id=$1 AND owner_id=$2', [envelopeId, req.session.userId]);
+    if (r.rows.length > 0) return { ok: true, isOwner: true };
+  }
   const token = req.query.token;
-  if (!token) return false;
-  const r = await pool.query('SELECT 1 FROM signers WHERE envelope_id=$1 AND sign_token=$2', [envelopeId, token]);
-  return r.rows.length > 0;
+  if (token) {
+    const r = await pool.query('SELECT 1 FROM signers WHERE envelope_id=$1 AND sign_token=$2', [envelopeId, token]);
+    if (r.rows.length > 0) return { ok: true, isOwner: false };
+  }
+  return { ok: false, isOwner: false };
 }
 
 router.get('/envelopes/:id', async (req, res) => {
-  const ok = await resolveAccess(req, req.params.id);
-  if (!ok) return res.status(403).json({ error: 'Not authorized' });
-  // Only the authenticated sender may see signing tokens/links — a signer's own token
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).json({ error: 'Not authorized' });
+  // Only the owning sender may see signing tokens/links — a signer's own token
   // must never unlock another signer's token, or they could sign on someone else's behalf.
-  const isSender = !!(req.session && req.session.authed);
+  const isSender = access.isOwner;
   const env = await loadEnvelopeRow(req.params.id);
   if (!env) return res.status(404).json({ error: 'Not found' });
   const signers = await loadSigners(env.id);
@@ -198,11 +203,12 @@ router.get('/envelopes/:id', async (req, res) => {
   });
 });
 
-// ---------- delete (sender only — gated by session in server.js's /api middleware) ----------
+// ---------- delete (owner only — session gated in server.js, ownership checked here) ----------
 router.delete('/envelopes/:id', async (req, res) => {
-  if (!req.session || !req.session.authed) return res.status(401).json({ error: 'Not authenticated' });
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
   const env = await loadEnvelopeRow(req.params.id);
   if (!env) return res.status(404).json({ error: 'Not found' });
+  if (env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
   // ON DELETE CASCADE on signers, envelope_pages, and audit_log means this one
   // statement removes the whole envelope and everything tied to it, including
   // every stored document byte, signature image, and the audit trail itself.
@@ -213,8 +219,8 @@ router.delete('/envelopes/:id', async (req, res) => {
 
 // ---------- file / page / signature serving ----------
 router.get('/envelopes/:id/file', async (req, res) => {
-  const ok = await resolveAccess(req, req.params.id);
-  if (!ok) return res.status(403).end();
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
   const env = await loadEnvelopeRow(req.params.id);
   if (!env || !env.original_bytes) return res.status(404).end();
   res.setHeader('Content-Type', env.mime_type || 'application/octet-stream');
@@ -223,8 +229,8 @@ router.get('/envelopes/:id/file', async (req, res) => {
 });
 
 router.get('/envelopes/:id/pages/:idx', async (req, res) => {
-  const ok = await resolveAccess(req, req.params.id);
-  if (!ok) return res.status(403).end();
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
   const r = await pool.query('SELECT * FROM envelope_pages WHERE envelope_id=$1 AND page_index=$2', [req.params.id, req.params.idx]);
   if (!r.rows[0]) return res.status(404).end();
   res.setHeader('Content-Type', r.rows[0].mime_type);
@@ -232,8 +238,8 @@ router.get('/envelopes/:id/pages/:idx', async (req, res) => {
 });
 
 router.get('/envelopes/:id/signers/:sid/signature', async (req, res) => {
-  const ok = await resolveAccess(req, req.params.id);
-  if (!ok) return res.status(403).end();
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
   const r = await pool.query('SELECT signature_bytes, signature_mime FROM signers WHERE id=$1 AND envelope_id=$2', [req.params.sid, req.params.id]);
   if (!r.rows[0] || !r.rows[0].signature_bytes) return res.status(404).end();
   res.setHeader('Content-Type', r.rows[0].signature_mime || 'image/png');
@@ -241,8 +247,8 @@ router.get('/envelopes/:id/signers/:sid/signature', async (req, res) => {
 });
 
 router.get('/envelopes/:id/download', async (req, res) => {
-  const ok = await resolveAccess(req, req.params.id);
-  if (!ok) return res.status(403).end();
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
   const env = await loadEnvelopeRow(req.params.id);
   if (!env || env.status !== 'completed' || !env.final_pdf_bytes) return res.status(409).json({ error: 'Not yet completed' });
   res.setHeader('Content-Type', 'application/pdf');

@@ -19,8 +19,18 @@ const pool = new Pool({
 // statement would fail with "permission denied for database" even when the schema
 // already exists, because Postgres checks the privilege before checking existence.
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  reset_token TEXT,
+  reset_token_expires TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS envelopes (
   id UUID PRIMARY KEY,
+  owner_id UUID REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   source_type TEXT NOT NULL, -- 'pdf' | 'docx' | 'image'
   file_name TEXT NOT NULL,
@@ -35,6 +45,11 @@ CREATE TABLE IF NOT EXISTS envelopes (
   final_pdf_bytes BYTEA,
   fingerprint TEXT
 );
+
+-- Safe to run against the existing production table: adds the column as NULL
+-- for any envelopes created before multi-user accounts existed, rather than
+-- failing or requiring the table to be empty.
+ALTER TABLE envelopes ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id) ON DELETE CASCADE;
 
 CREATE TABLE IF NOT EXISTS envelope_pages (
   id UUID PRIMARY KEY,
@@ -69,6 +84,9 @@ CREATE INDEX IF NOT EXISTS idx_signers_envelope ON signers(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_pages_envelope ON envelope_pages(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_audit_envelope ON audit_log(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_signers_token ON signers(sign_token);
+CREATE INDEX IF NOT EXISTS idx_envelopes_owner ON envelopes(owner_id);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token);
 `;
 
 async function ensureSchema() {
