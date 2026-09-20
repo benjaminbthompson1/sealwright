@@ -1,7 +1,8 @@
 const express = require('express');
 const {
   isValidEmail, findUserByEmail, createUser, verifyPassword,
-  setResetToken, findUserByValidResetToken, resetPassword, countUsers, claimOrphanedEnvelopes
+  setResetToken, findUserByValidResetToken, resetPassword, countUsers,
+  claimOrphanedEnvelopes, ensureFirstAdmin
 } = require('../auth');
 const { sendMail } = require('../mailer');
 
@@ -39,7 +40,7 @@ function topbar(user) {
     <a href="/" class="brand">${LOGO_SVG(38)}<span class="brand-word">Toolkit AI</span></a>
     <div class="topbar-actions">
       ${user
-        ? `<span class="user-email">${escapeHtml(user.email)}</span><form method="POST" action="/logout" style="display:inline;"><button class="btn btn-ghost" type="submit">Sign out</button></form>`
+        ? `${user.isAdmin ? '<a href="/admin" class="btn btn-ghost">Admin</a>' : ''}<span class="user-email">${escapeHtml(user.email)}</span><form method="POST" action="/logout" style="display:inline;"><button class="btn btn-ghost" type="submit">Sign out</button></form>`
         : `<a href="/login" class="btn btn-ghost">Sign in</a><a href="/signup" class="btn btn-primary">Sign up</a>`}
     </div></div>`;
 }
@@ -51,7 +52,7 @@ function escapeHtml(s) {
 
 // ---------- landing page ----------
 router.get('/', (req, res) => {
-  const user = req.session && req.session.userId ? { email: req.session.userEmail } : null;
+  const user = req.session && req.session.userId ? { email: req.session.userEmail, isAdmin: !!req.session.isAdmin } : null;
   let body = topbar(user);
   if (user) {
     body += `
@@ -97,13 +98,17 @@ function sealwrightIcon(size) {
 // ---------- signup ----------
 router.get('/signup', (req, res) => {
   if (req.session && req.session.userId) return res.redirect('/');
+  const q = req.query;
   res.send(shell('Sign up', `${topbar(null)}
     <div class="auth-shell"><div class="auth-card">
       <h2>Create your account</h2>
       <p class="sub">Get access to every app on Toolkit AI.</p>
-      ${req.query.err ? `<div class="banner banner-error">${escapeHtml(req.query.err)}</div>` : ''}
+      ${q.err ? `<div class="banner banner-error">${escapeHtml(q.err)}</div>` : ''}
       <form method="POST" action="/signup">
-        <div class="field"><label>Email</label><input type="email" name="email" required autofocus value="${escapeHtml(req.query.email)}"></div>
+        <div class="field"><label>First name</label><input type="text" name="firstName" required autofocus value="${escapeHtml(q.firstName)}"></div>
+        <div class="field"><label>Last name</label><input type="text" name="lastName" required value="${escapeHtml(q.lastName)}"></div>
+        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(q.email)}"></div>
+        <div class="field"><label>Phone number</label><input type="tel" name="phone" required value="${escapeHtml(q.phone)}"></div>
         <div class="field"><label>Password</label><input type="password" name="password" required minlength="8">
           <div class="field-hint">At least 8 characters.</div>
         </div>
@@ -116,21 +121,35 @@ router.get('/signup', (req, res) => {
 router.post('/signup', express.urlencoded({ extended: false }), async (req, res) => {
   const email = (req.body.email || '').trim();
   const password = req.body.password || '';
-  const fail = (msg) => res.redirect(`/signup?err=${encodeURIComponent(msg)}&email=${encodeURIComponent(email)}`);
+  const firstName = (req.body.firstName || '').trim();
+  const lastName = (req.body.lastName || '').trim();
+  const phone = (req.body.phone || '').trim();
+  const fail = (msg) => {
+    const qs = new URLSearchParams({ err: msg, email, firstName, lastName, phone }).toString();
+    res.redirect(`/signup?${qs}`);
+  };
+  if (!firstName) return fail('First name is required.');
+  if (!lastName) return fail('Last name is required.');
   if (!isValidEmail(email)) return fail("That email address doesn't look valid.");
+  if (!phone) return fail('Phone number is required.');
   if (password.length < 8) return fail('Password must be at least 8 characters.');
   const existing = await findUserByEmail(email);
   if (existing) return fail('An account with that email already exists.');
 
-  const user = await createUser(email, password);
+  const user = await createUser(email, password, { firstName, lastName, phone });
   const total = await countUsers();
   if (total === 1) {
     // First account ever created inherits any envelopes made before multi-user
     // accounts existed — there's no ambiguity about whose they were.
     await claimOrphanedEnvelopes(user.id);
   }
+  // No-op once an admin already exists; otherwise promotes whoever's oldest,
+  // which on a brand-new deployment is the account that was just created.
+  await ensureFirstAdmin();
+  const fresh = await findUserByEmail(email);
   req.session.userId = user.id;
   req.session.userEmail = user.email;
+  req.session.isAdmin = fresh.is_admin;
   res.redirect('/');
 });
 
@@ -163,6 +182,7 @@ router.post('/login', express.urlencoded({ extended: false }), async (req, res) 
   }
   req.session.userId = user.id;
   req.session.userEmail = user.email;
+  req.session.isAdmin = user.is_admin;
   res.redirect('/');
 });
 
