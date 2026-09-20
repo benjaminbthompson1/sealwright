@@ -62,11 +62,12 @@
         return `<span class="${cls}" title="${escapeHtml(s.name)}"></span>`;
       }).join('');
       const badge = env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : '<span class="badge badge-progress">In progress</span>';
+      const recipientBadge = env.is_owner === false ? '<span class="badge" style="background:var(--brass-tint); color:var(--brass);">Sent to you</span>' : '';
       return `<div class="env-row" data-id="${env.id}">
         <div class="env-row-main"><h3>${escapeHtml(env.title)}</h3>
           <div class="faint">${env.signers.length} signer${env.signers.length === 1 ? '' : 's'} · created ${formatDateTime(env.created_at)}</div>
           <div class="env-progress">${dots}<span class="faint" style="margin-left:6px;">${signedCount}/${env.signers.length} signed</span></div>
-        </div>${badge}</div>`;
+        </div><div style="display:flex; gap:6px; align-items:flex-start;">${recipientBadge}${badge}</div></div>`;
     }).join('');
     return `<div class="env-list">${rows}</div>`;
   }
@@ -316,19 +317,21 @@
       <div class="banner banner-info" style="margin-top:22px;"><strong>Document executed.</strong> All parties have signed.
       ${env.fingerprint ? `<div class="fingerprint" style="margin-top:8px;">SHA-256 fingerprint: ${env.fingerprint}</div>` : ''}</div>
       <div style="margin-top:14px;"><a class="btn btn-primary" href="/sealwright/api/envelopes/${env.id}/download">Download executed document</a></div>` : '';
+    const deleteSection = env.is_owner ? `
+      <hr class="hr">
+      <div id="deleteError" class="warn-text" style="display:none;"></div>
+      <button class="btn btn-danger btn-sm" id="btnDeleteEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete this envelope</button>
+      <p class="faint" style="margin-top:8px;">Permanently removes the document, every signature, and the activity log. This cannot be undone.</p>` : '';
     setTimeout(() => loadDetailPreview(env), 0);
     return `<div class="page-card">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
-        <div><h2 class="section-title">${escapeHtml(env.title)}</h2><p class="faint">Created ${formatDateTime(env.created_at)} · ${env.sequential ? 'Sequential' : 'Parallel'} routing</p></div>
+        <div><h2 class="section-title">${escapeHtml(env.title)}</h2><p class="faint">Created ${formatDateTime(env.created_at)} · ${env.sequential ? 'Sequential' : 'Parallel'} routing${env.is_owner === false ? ' · Sent to you' : ''}</p></div>
         ${env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : '<span class="badge badge-progress">In progress</span>'}
       </div>
       <div class="doc-preview" id="detailPreview" style="margin-top:18px;">${preview}</div>
       <h3 style="margin-top:26px; font-size:16px;">Signers</h3><div class="sig-block-panel">${rows}</div>
       ${completedBlock}<hr class="hr"><h3 style="font-size:16px;">Activity</h3><div class="audit-log">${auditRows}</div>
-      <hr class="hr">
-      <div id="deleteError" class="warn-text" style="display:none;"></div>
-      <button class="btn btn-danger btn-sm" id="btnDeleteEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete this envelope</button>
-      <p class="faint" style="margin-top:8px;">Permanently removes the document, every signature, and the activity log. This cannot be undone.</p>
+      ${deleteSection}
     </div>`;
   }
 
