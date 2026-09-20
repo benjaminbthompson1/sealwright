@@ -1,8 +1,9 @@
 const express = require('express');
 const {
-  isValidEmail, findUserByEmail, createUser, verifyPassword,
+  isValidEmail, findUserByEmail, findUserById, createUser, verifyPassword,
   setResetToken, findUserByValidResetToken, resetPassword, countUsers,
-  claimOrphanedEnvelopes, ensureFirstAdmin
+  claimOrphanedEnvelopes, ensureFirstAdmin, requireAuth,
+  emailTakenByAnotherUser, updateUserProfile
 } = require('../auth');
 const { sendMail } = require('../mailer');
 
@@ -40,7 +41,7 @@ function topbar(user) {
     <a href="/" class="brand">${LOGO_SVG(38)}<span class="brand-word">Toolkit AI</span></a>
     <div class="topbar-actions">
       ${user
-        ? `${user.isAdmin ? '<a href="/admin" class="btn btn-ghost">Admin</a>' : ''}<span class="user-email">${escapeHtml(user.email)}</span><form method="POST" action="/logout" style="display:inline;"><button class="btn btn-ghost" type="submit">Sign out</button></form>`
+        ? `${user.isAdmin ? '<a href="/admin" class="btn btn-ghost">Admin</a>' : ''}<a href="/profile" class="btn btn-ghost">Profile</a><span class="user-email">${escapeHtml(user.email)}</span><form method="POST" action="/logout" style="display:inline;"><button class="btn btn-ghost" type="submit">Sign out</button></form>`
         : `<a href="/login" class="btn btn-ghost">Sign in</a><a href="/signup" class="btn btn-primary">Sign up</a>`}
     </div></div>`;
 }
@@ -188,6 +189,47 @@ router.post('/login', express.urlencoded({ extended: false }), async (req, res) 
 
 router.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
+});
+
+// ---------- profile ----------
+router.get('/profile', requireAuth, async (req, res) => {
+  const user = await findUserById(req.session.userId);
+  const q = req.query;
+  res.send(shell('Your profile', `${topbar({ email: req.session.userEmail, isAdmin: !!req.session.isAdmin })}
+    <div class="auth-shell"><div class="auth-card">
+      <h2>Your profile</h2>
+      <p class="sub">Update your account details.</p>
+      ${q.err ? `<div class="banner banner-error">${escapeHtml(q.err)}</div>` : ''}
+      ${q.saved ? `<div class="banner banner-success">Your profile has been updated.</div>` : ''}
+      <form method="POST" action="/profile">
+        <div class="field"><label>First name</label><input type="text" name="firstName" required value="${escapeHtml(q.firstName !== undefined ? q.firstName : user.first_name)}"></div>
+        <div class="field"><label>Last name</label><input type="text" name="lastName" required value="${escapeHtml(q.lastName !== undefined ? q.lastName : user.last_name)}"></div>
+        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(q.email !== undefined ? q.email : user.email)}"></div>
+        <div class="field"><label>Phone number</label><input type="tel" name="phone" required value="${escapeHtml(q.phone !== undefined ? q.phone : user.phone)}"></div>
+        <button class="btn btn-primary btn-block" type="submit">Save changes</button>
+      </form>
+      <div class="auth-foot"><a class="link" href="/forgot-password">Change your password</a></div>
+    </div></div>`));
+});
+
+router.post('/profile', requireAuth, express.urlencoded({ extended: false }), async (req, res) => {
+  const firstName = (req.body.firstName || '').trim();
+  const lastName = (req.body.lastName || '').trim();
+  const email = (req.body.email || '').trim();
+  const phone = (req.body.phone || '').trim();
+  const fail = (msg) => {
+    const qs = new URLSearchParams({ err: msg, firstName, lastName, email, phone }).toString();
+    res.redirect(`/profile?${qs}`);
+  };
+  if (!firstName) return fail('First name is required.');
+  if (!lastName) return fail('Last name is required.');
+  if (!isValidEmail(email)) return fail("That email address doesn't look valid.");
+  if (!phone) return fail('Phone number is required.');
+  if (await emailTakenByAnotherUser(email, req.session.userId)) return fail('Another account already uses that email.');
+
+  await updateUserProfile(req.session.userId, { firstName, lastName, email, phone });
+  req.session.userEmail = email;
+  res.redirect('/profile?saved=1');
 });
 
 // ---------- forgot / reset password ----------
