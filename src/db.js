@@ -23,10 +23,21 @@ CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
+  first_name TEXT,
+  last_name TEXT,
+  phone TEXT,
+  is_admin BOOLEAN NOT NULL DEFAULT false,
   reset_token TEXT,
   reset_token_expires TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Safe to run against the existing production table: these land as NULL/false
+-- for any accounts created before this feature existed, rather than failing.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS envelopes (
   id UUID PRIMARY KEY,
