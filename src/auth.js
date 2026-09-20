@@ -88,6 +88,21 @@ async function resetPassword(userId, newPassword) {
   await pool.query('UPDATE users SET password_hash=$1, reset_token=NULL, reset_token_expires=NULL WHERE id=$2', [passwordHash, userId]);
 }
 
+async function emailTakenByAnotherUser(email, excludeUserId) {
+  const r = await pool.query('SELECT 1 FROM users WHERE email=$1 AND id<>$2', [String(email).trim().toLowerCase(), excludeUserId]);
+  return r.rows.length > 0;
+}
+
+// Shared by both the self-service profile page and the admin edit page — one
+// place validates and applies the update regardless of who's doing it.
+async function updateUserProfile(userId, { firstName, lastName, email, phone }) {
+  const normalizedEmail = String(email).trim().toLowerCase();
+  await pool.query(
+    'UPDATE users SET first_name=$1, last_name=$2, email=$3, phone=$4 WHERE id=$5',
+    [firstName || null, lastName || null, normalizedEmail, phone || null, userId]
+  );
+}
+
 // ---------- one-time migration: envelopes created before accounts existed had
 // no owner. Rather than leave them orphaned forever, the very first account
 // ever created inherits them — there is no ambiguity about whose they were,
@@ -151,5 +166,6 @@ module.exports = {
   hashPassword, verifyPassword,
   findUserByEmail, findUserById, countUsers, createUser,
   setResetToken, findUserByValidResetToken, resetPassword,
-  claimOrphanedEnvelopes, ensureFirstAdmin, listAllUsers, deleteUser
+  claimOrphanedEnvelopes, ensureFirstAdmin, listAllUsers, deleteUser,
+  emailTakenByAnotherUser, updateUserProfile
 };
