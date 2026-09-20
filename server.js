@@ -2,8 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { pool, ensureSchema } = require('./src/db');
-const { sessionMiddleware, requireAuth } = require('./src/auth');
+const { sessionMiddleware, requireAuth, ensureFirstAdmin } = require('./src/auth');
 const portalRouter = require('./src/routes/portal');
+const adminRouter = require('./src/routes/admin');
 const pagesRouter = require('./src/routes/pages');
 const apiRouter = require('./src/routes/api');
 
@@ -44,12 +45,17 @@ app.use('/sealwright/api', (req, res, next) => {
 });
 app.use('/sealwright/api', apiRouter);
 app.use('/sealwright', pagesRouter);
+app.use('/admin', adminRouter);
 app.use('/', portalRouter);
 
 async function start() {
   try {
     await ensureSchema();
     console.log('Database schema ready.');
+    // No-op once an admin already exists; otherwise promotes the earliest
+    // account, which retroactively makes an account created before this
+    // feature existed the admin, with no manual step required.
+    await ensureFirstAdmin();
   } catch (err) {
     console.error('Failed to prepare database schema:', err.message || err.code || String(err));
     if (err.stack) console.error(err.stack);
