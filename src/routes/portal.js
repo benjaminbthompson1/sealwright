@@ -6,6 +6,9 @@ const {
   emailTakenByAnotherUser, updateUserProfile
 } = require('../auth');
 const { sendMail } = require('../mailer');
+const {
+  welcomeEmail, resetPasswordLinkEmail, passwordChangedEmail, accountUpdatedEmail
+} = require('../emailTemplates');
 
 const router = express.Router();
 
@@ -182,6 +185,11 @@ router.post('/signup', express.urlencoded({ extended: false }), async (req, res)
   req.session.userId = user.id;
   req.session.userEmail = user.email;
   req.session.isAdmin = fresh.is_admin;
+
+  const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const w = welcomeEmail({ firstName, email: user.email, loginUrl: base });
+  sendMail({ to: user.email, subject: w.subject, text: w.text, html: w.html }).catch(e => console.error('welcome email failed', e.message));
+
   res.redirect('/');
 });
 
@@ -258,8 +266,23 @@ router.post('/profile', requireAuth, express.urlencoded({ extended: false }), as
   if (!phone) return fail('Phone number is required.');
   if (await emailTakenByAnotherUser(email, req.session.userId)) return fail('Another account already uses that email.');
 
+  const before = await findUserById(req.session.userId);
   await updateUserProfile(req.session.userId, { firstName, lastName, email, phone });
   req.session.userEmail = email;
+
+  const changes = [];
+  if (before.email !== email) changes.push(`Email changed to ${email}`);
+  if (before.phone !== phone) changes.push('Phone number updated');
+  if (before.first_name !== firstName || before.last_name !== lastName) changes.push('Name updated');
+  if (changes.length) {
+    // Notify the address on file BEFORE the change — if email itself was the
+    // thing that changed, this is what actually alerts the real account
+    // owner even if someone changed it to an address they don't control.
+    const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const n = accountUpdatedEmail({ firstName, changes, forgotPasswordUrl: `${base}/forgot-password` });
+    sendMail({ to: before.email, subject: n.subject, text: n.text, html: n.html }).catch(e => console.error('account-updated email failed', e.message));
+  }
+
   res.redirect('/profile?saved=1');
 });
 
@@ -287,12 +310,8 @@ router.post('/forgot-password', express.urlencoded({ extended: false }), async (
     const token = await setResetToken(user.id);
     const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
     const link = `${base}/reset-password/${token}`;
-    sendMail({
-      to: user.email,
-      subject: 'Reset your Toolkit AI password',
-      text: `Reset your password: ${link} (expires in 1 hour)`,
-      html: `<p>Click below to set a new password. This link expires in 1 hour.</p><p><a href="${link}">${link}</a></p>`
-    }).catch(e => console.error('reset email failed', e.message));
+    const r = resetPasswordLinkEmail({ email: user.email, resetUrl: link });
+    sendMail({ to: user.email, subject: r.subject, text: r.text, html: r.html }).catch(e => console.error('reset email failed', e.message));
   }
   res.redirect('/forgot-password?sent=1');
 });
@@ -327,6 +346,11 @@ router.post('/reset-password/:token', express.urlencoded({ extended: false }), a
     return res.redirect(`/reset-password/${req.params.token}?err=${encodeURIComponent('Password must be at least 8 characters.')}`);
   }
   await resetPassword(user.id, password);
+
+  const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const p = passwordChangedEmail({ firstName: user.first_name, forgotPasswordUrl: `${base}/forgot-password` });
+  sendMail({ to: user.email, subject: p.subject, text: p.text, html: p.html }).catch(e => console.error('password-changed email failed', e.message));
+
   res.redirect('/login?reset=1');
 });
 
