@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAdmin, listAllUsers, deleteUser, findUserById } = require('../auth');
+const { requireAdmin, listAllUsers, deleteUser, findUserById, isValidEmail, emailTakenByAnotherUser, updateUserProfile } = require('../auth');
 
 const router = express.Router();
 
@@ -47,11 +47,15 @@ router.get('/', requireAdmin, async (req, res) => {
       <td>${escapeHtml(u.phone) || '—'}</td>
       <td>${formatDateTime(u.created_at)}</td>
       <td>${u.envelope_count}</td>
-      <td>${isSelf
-        ? '<span class="faint">This is you</span>'
-        : `<form method="POST" action="/admin/users/${u.id}/delete" onsubmit="return confirm('Delete the account for ${escapeHtml(name)} (${escapeHtml(u.email)})? This also deletes every envelope they own. This cannot be undone.');">
-             <button class="btn btn-danger btn-sm" type="submit">Delete</button>
-           </form>`}
+      <td>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <a class="btn btn-ghost btn-sm" href="/admin/users/${u.id}/edit">Edit</a>
+          ${isSelf
+            ? '<span class="faint">This is you</span>'
+            : `<form method="POST" action="/admin/users/${u.id}/delete" onsubmit="return confirm('Delete the account for ${escapeHtml(name)} (${escapeHtml(u.email)})? This also deletes every envelope they own. This cannot be undone.');">
+                 <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+               </form>`}
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -82,6 +86,52 @@ router.post('/users/:id/delete', requireAdmin, async (req, res) => {
   if (!target) return res.redirect('/admin');
   await deleteUser(req.params.id);
   console.log(`Admin ${req.adminUser.email} deleted user account: ${target.email}`);
+  res.redirect('/admin');
+});
+
+router.get('/users/:id/edit', requireAdmin, async (req, res) => {
+  const target = await findUserById(req.params.id);
+  if (!target) return res.redirect('/admin');
+  const q = req.query;
+  res.send(shell('Edit user', `
+    <div class="topbar">
+      <a href="/" class="brand">${LOGO_SVG(38)}<span class="brand-word">Toolkit AI Admin</span></a>
+      <div class="topbar-actions"><a href="/admin" class="btn btn-ghost">← All accounts</a></div>
+    </div>
+    <div class="auth-shell"><div class="auth-card">
+      <h2>Edit account</h2>
+      <p class="sub">${target.id === req.adminUser.id ? 'This is your own account.' : `Signed up ${formatDateTime(target.created_at)}`}</p>
+      ${q.err ? `<div class="banner banner-error">${escapeHtml(q.err)}</div>` : ''}
+      <form method="POST" action="/admin/users/${target.id}/edit">
+        <div class="field"><label>First name</label><input type="text" name="firstName" required value="${escapeHtml(q.firstName !== undefined ? q.firstName : target.first_name)}"></div>
+        <div class="field"><label>Last name</label><input type="text" name="lastName" required value="${escapeHtml(q.lastName !== undefined ? q.lastName : target.last_name)}"></div>
+        <div class="field"><label>Email</label><input type="email" name="email" required value="${escapeHtml(q.email !== undefined ? q.email : target.email)}"></div>
+        <div class="field"><label>Phone number</label><input type="tel" name="phone" required value="${escapeHtml(q.phone !== undefined ? q.phone : target.phone)}"></div>
+        <button class="btn btn-primary btn-block" type="submit">Save changes</button>
+      </form>
+    </div></div>
+  `));
+});
+
+router.post('/users/:id/edit', requireAdmin, express.urlencoded({ extended: false }), async (req, res) => {
+  const firstName = (req.body.firstName || '').trim();
+  const lastName = (req.body.lastName || '').trim();
+  const email = (req.body.email || '').trim();
+  const phone = (req.body.phone || '').trim();
+  const fail = (msg) => {
+    const qs = new URLSearchParams({ err: msg, firstName, lastName, email, phone }).toString();
+    res.redirect(`/admin/users/${req.params.id}/edit?${qs}`);
+  };
+  const target = await findUserById(req.params.id);
+  if (!target) return res.redirect('/admin');
+  if (!firstName) return fail('First name is required.');
+  if (!lastName) return fail('Last name is required.');
+  if (!isValidEmail(email)) return fail("That email address doesn't look valid.");
+  if (!phone) return fail('Phone number is required.');
+  if (await emailTakenByAnotherUser(email, target.id)) return fail('Another account already uses that email.');
+
+  await updateUserProfile(target.id, { firstName, lastName, email, phone });
+  console.log(`Admin ${req.adminUser.email} updated user account: ${target.email} → ${email}`);
   res.redirect('/admin');
 });
 
