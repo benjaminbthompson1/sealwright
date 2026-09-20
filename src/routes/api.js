@@ -155,7 +155,19 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
 
 // ---------- list ----------
 router.get('/envelopes', async (req, res) => {
-  const envs = await pool.query('SELECT id, title, status, sequential, current_turn_index, created_at FROM envelopes WHERE owner_id=$1 ORDER BY created_at DESC', [req.session.userId]);
+  // Includes envelopes this user owns (sent) AND envelopes where they appear
+  // as a signer under the same email as their account (received) — matched
+  // case-insensitively since signer emails are typed freely at creation time
+  // and aren't normalized the way account emails are.
+  const envs = await pool.query(
+    `SELECT e.id, e.title, e.status, e.sequential, e.current_turn_index, e.created_at,
+            (e.owner_id = $1) AS is_owner
+     FROM envelopes e
+     WHERE e.owner_id = $1
+        OR EXISTS (SELECT 1 FROM signers s WHERE s.envelope_id = e.id AND LOWER(s.email) = LOWER($2))
+     ORDER BY e.created_at DESC`,
+    [req.session.userId, req.session.userEmail || '']
+  );
   const out = [];
   for (const e of envs.rows) {
     const signers = await pool.query('SELECT id, name, email, status, order_index FROM signers WHERE envelope_id=$1 ORDER BY order_index', [e.id]);
@@ -164,11 +176,22 @@ router.get('/envelopes', async (req, res) => {
   res.json(out);
 });
 
-// ---------- detail (owner via session OR a signer via their own token) ----------
+// ---------- detail (owner via session, a recipient whose account email
+// matches a signer on the envelope, OR a signer via their own token) ----------
 async function resolveAccess(req, envelopeId) {
   if (req.session && req.session.userId) {
-    const r = await pool.query('SELECT 1 FROM envelopes WHERE id=$1 AND owner_id=$2', [envelopeId, req.session.userId]);
-    if (r.rows.length > 0) return { ok: true, isOwner: true };
+    const ownerCheck = await pool.query('SELECT 1 FROM envelopes WHERE id=$1 AND owner_id=$2', [envelopeId, req.session.userId]);
+    if (ownerCheck.rows.length > 0) return { ok: true, isOwner: true };
+    if (req.session.userEmail) {
+      const recipientCheck = await pool.query(
+        'SELECT 1 FROM signers WHERE envelope_id=$1 AND LOWER(email)=LOWER($2)',
+        [envelopeId, req.session.userEmail]
+      );
+      // A logged-in recipient gets read access (view, download) but never
+      // isOwner — that flag is what unlocks other signers' tokens and the
+      // delete action, and must stay reserved for the actual sender.
+      if (recipientCheck.rows.length > 0) return { ok: true, isOwner: false };
+    }
   }
   const token = req.query.token;
   if (token) {
@@ -193,7 +216,7 @@ router.get('/envelopes/:id', async (req, res) => {
     id: env.id, title: env.title, source_type: env.source_type, file_name: env.file_name,
     sequential: env.sequential, current_turn_index: env.current_turn_index, status: env.status,
     created_at: env.created_at, completed_at: env.completed_at, fingerprint: env.fingerprint,
-    has_final: !!env.final_pdf_bytes, page_count: pages.length,
+    has_final: !!env.final_pdf_bytes, page_count: pages.length, is_owner: isSender,
     signers: signers.map(s => ({
       id: s.id, name: s.name, email: s.email, order_index: s.order_index, status: s.status,
       signed_at: s.signed_at, method: s.method, has_signature: !!s.signature_bytes,
