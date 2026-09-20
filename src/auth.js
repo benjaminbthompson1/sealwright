@@ -60,11 +60,14 @@ async function countUsers() {
   return r.rows[0].n;
 }
 
-async function createUser(email, password) {
+async function createUser(email, password, { firstName, lastName, phone } = {}) {
   const id = crypto.randomUUID();
   const normalizedEmail = String(email).trim().toLowerCase();
   const passwordHash = hashPassword(password);
-  await pool.query('INSERT INTO users (id, email, password_hash) VALUES ($1,$2,$3)', [id, normalizedEmail, passwordHash]);
+  await pool.query(
+    'INSERT INTO users (id, email, password_hash, first_name, last_name, phone) VALUES ($1,$2,$3,$4,$5,$6)',
+    [id, normalizedEmail, passwordHash, firstName || null, lastName || null, phone || null]
+  );
   return { id, email: normalizedEmail };
 }
 
@@ -93,6 +96,37 @@ async function claimOrphanedEnvelopes(userId) {
   await pool.query('UPDATE envelopes SET owner_id=$1 WHERE owner_id IS NULL', [userId]);
 }
 
+// ---------- admin ----------
+// Runs on every boot; a no-op once an admin already exists. Promotes the
+// earliest-created account rather than requiring anyone to flip a flag by
+// hand — this is what retroactively makes an already-existing account (like
+// one created before this feature existed) the admin with zero extra steps.
+async function ensureFirstAdmin() {
+  const existing = await pool.query('SELECT 1 FROM users WHERE is_admin=true LIMIT 1');
+  if (existing.rows.length) return;
+  await pool.query(`
+    UPDATE users SET is_admin=true
+    WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
+  `);
+}
+
+async function listAllUsers() {
+  const r = await pool.query(`
+    SELECT u.id, u.email, u.first_name, u.last_name, u.phone, u.is_admin, u.created_at,
+           (SELECT count(*)::int FROM envelopes e WHERE e.owner_id = u.id) AS envelope_count
+    FROM users u
+    ORDER BY u.created_at ASC
+  `);
+  return r.rows;
+}
+
+async function deleteUser(id) {
+  // Cascades to that user's envelopes (and, through those, signers/pages/audit
+  // log) via the existing foreign-key ON DELETE CASCADE chain — no separate
+  // cleanup needed here.
+  await pool.query('DELETE FROM users WHERE id=$1', [id]);
+}
+
 function requireAuth(req, res, next) {
   if (req.session && req.session.userId) return next();
   // req.path is rewritten relative to the mount point inside app.use('/sealwright', ...),
@@ -101,10 +135,21 @@ function requireAuth(req, res, next) {
   return res.redirect('/login');
 }
 
+// Always re-checks is_admin fresh from the database rather than trusting a
+// session flag, since this gates a genuinely sensitive area (every user's
+// data, and account deletion).
+async function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.userId) return res.redirect('/login');
+  const user = await findUserById(req.session.userId);
+  if (!user || !user.is_admin) return res.status(403).send('Not authorized.');
+  req.adminUser = user;
+  next();
+}
+
 module.exports = {
-  sessionMiddleware, requireAuth, isValidEmail,
+  sessionMiddleware, requireAuth, requireAdmin, isValidEmail,
   hashPassword, verifyPassword,
   findUserByEmail, findUserById, countUsers, createUser,
   setResetToken, findUserByValidResetToken, resetPassword,
-  claimOrphanedEnvelopes
+  claimOrphanedEnvelopes, ensureFirstAdmin, listAllUsers, deleteUser
 };
