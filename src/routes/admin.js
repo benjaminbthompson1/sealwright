@@ -1,5 +1,7 @@
 const express = require('express');
 const { requireAdmin, listAllUsers, deleteUser, findUserById, isValidEmail, emailTakenByAnotherUser, updateUserProfile } = require('../auth');
+const { sendMail } = require('../mailer');
+const { accountUpdatedEmail } = require('../emailTemplates');
 
 const router = express.Router();
 
@@ -132,6 +134,20 @@ router.post('/users/:id/edit', requireAdmin, express.urlencoded({ extended: fals
 
   await updateUserProfile(target.id, { firstName, lastName, email, phone });
   console.log(`Admin ${req.adminUser.email} updated user account: ${target.email} → ${email}`);
+
+  const changes = [];
+  if (target.email !== email) changes.push(`Email changed to ${email}`);
+  if (target.phone !== phone) changes.push('Phone number updated');
+  if (target.first_name !== firstName || target.last_name !== lastName) changes.push('Name updated');
+  if (changes.length) {
+    const base = process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const n = accountUpdatedEmail({ firstName, changes, forgotPasswordUrl: `${base}/forgot-password` });
+    // Notify the address on file BEFORE this edit, same reasoning as the
+    // self-service path: that's what actually reaches the real account
+    // owner if email itself was the field that got changed.
+    sendMail({ to: target.email, subject: n.subject, text: n.text, html: n.html }).catch(e => console.error('account-updated email failed', e.message));
+  }
+
   res.redirect('/admin');
 });
 
