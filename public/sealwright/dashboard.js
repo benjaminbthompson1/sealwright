@@ -392,13 +392,91 @@
       layer.innerHTML = onPage.map(f => {
         const info = bySigner[f.signer_id] || { name: '?', color: '#888' };
         const label = FIELD_DEFAULTS[f.field_type].label;
-        return `<div class="placed-field" data-field-id="${f.id}" title="Click to remove"
+        return `<div class="placed-field" data-field-id="${f.id}" data-x="${f.x}" data-y="${f.y}" data-width="${f.width}" data-height="${f.height}"
           style="position:absolute; left:${f.x * 100}%; top:${f.y * 100}%; width:${f.width * 100}%; height:${f.height * 100}%;
-          border:2px dashed ${info.color}; background:${info.color}22; border-radius:3px; cursor:pointer;
+          border:2px dashed ${info.color}; background:${info.color}22; border-radius:3px; cursor:move; user-select:none;
           display:flex; align-items:center; justify-content:center; overflow:hidden;">
-          <span style="font-size:10px; font-weight:700; color:${info.color}; background:#fff; padding:1px 4px; border-radius:3px; white-space:nowrap;">${escapeHtml(info.name.split(' ')[0])} · ${label}</span>
+          <span style="font-size:10px; font-weight:700; color:${info.color}; background:#fff; padding:1px 4px; border-radius:3px; white-space:nowrap; pointer-events:none;">${escapeHtml(info.name.split(' ')[0])} · ${label}</span>
+          <button type="button" class="field-delete-btn" data-field-id="${f.id}" title="Remove field"
+            style="position:absolute; top:-9px; right:-9px; width:18px; height:18px; border-radius:50%; border:1.5px solid ${info.color};
+            background:#fff; color:${info.color}; font-size:11px; line-height:1; font-weight:700; cursor:pointer; padding:0;">✕</button>
         </div>`;
       }).join('');
+    });
+  }
+
+  function wireFieldDragging() {
+    app.querySelectorAll('.field-delete-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try { await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields/' + btn.getAttribute('data-field-id'), { method: 'DELETE' }); }
+        catch (err) { /* ignore */ }
+        await refreshFieldOverlays();
+        wireFieldDragging();
+      });
+    });
+
+    app.querySelectorAll('.placed-field').forEach(fieldEl => {
+      let dragging = false, moved = false;
+      let startX, startY, startFracX, startFracY, layerRect, fieldW, fieldH, fieldId;
+
+      function pointerPos(e) {
+        if (e.touches && e.touches[0]) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        return { x: e.clientX, y: e.clientY };
+      }
+      function onStart(e) {
+        if (e.target.closest('.field-delete-btn')) return;
+        e.preventDefault();
+        const p = pointerPos(e);
+        dragging = true; moved = false;
+        startX = p.x; startY = p.y;
+        startFracX = parseFloat(fieldEl.getAttribute('data-x'));
+        startFracY = parseFloat(fieldEl.getAttribute('data-y'));
+        fieldW = parseFloat(fieldEl.getAttribute('data-width'));
+        fieldH = parseFloat(fieldEl.getAttribute('data-height'));
+        fieldId = fieldEl.getAttribute('data-field-id');
+        layerRect = fieldEl.parentElement.getBoundingClientRect();
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('touchmove', onMove, { passive: false });
+        window.addEventListener('mouseup', onEnd);
+        window.addEventListener('touchend', onEnd);
+      }
+      function onMove(e) {
+        if (!dragging) return;
+        e.preventDefault();
+        const p = pointerPos(e);
+        if (Math.abs(p.x - startX) > 3 || Math.abs(p.y - startY) > 3) moved = true;
+        const dxFrac = (p.x - startX) / layerRect.width;
+        const dyFrac = (p.y - startY) / layerRect.height;
+        const newX = Math.max(0, Math.min(1 - fieldW, startFracX + dxFrac));
+        const newY = Math.max(0, Math.min(1 - fieldH, startFracY + dyFrac));
+        fieldEl.style.left = (newX * 100) + '%';
+        fieldEl.style.top = (newY * 100) + '%';
+        fieldEl.setAttribute('data-pending-x', newX);
+        fieldEl.setAttribute('data-pending-y', newY);
+      }
+      async function onEnd() {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('mouseup', onEnd);
+        window.removeEventListener('touchend', onEnd);
+        if (!dragging) return;
+        dragging = false;
+        if (moved) {
+          const newX = parseFloat(fieldEl.getAttribute('data-pending-x'));
+          const newY = parseFloat(fieldEl.getAttribute('data-pending-y'));
+          try {
+            await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields/' + fieldId, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ x: newX, y: newY })
+            });
+          } catch (err) { /* ignore — the refresh below re-syncs to whatever the server actually has */ }
+          await refreshFieldOverlays();
+          wireFieldDragging();
+        }
+      }
+      fieldEl.addEventListener('mousedown', onStart);
+      fieldEl.addEventListener('touchstart', onStart, { passive: false });
     });
   }
 
@@ -414,15 +492,11 @@
     }));
 
     app.querySelectorAll('.field-overlay').forEach(layer => {
+      // Click-to-place a NEW field — skipped entirely when the click is on an
+      // existing field, since that field's own handlers (drag / delete button)
+      // own that interaction instead.
       layer.addEventListener('click', async (e) => {
-        // A click that landed on an existing placed field deletes it instead of creating a new one.
-        const existing = e.target.closest('.placed-field');
-        if (existing) {
-          try { await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields/' + existing.getAttribute('data-field-id'), { method: 'DELETE' }); }
-          catch (err) { /* ignore */ }
-          refreshFieldOverlays();
-          return;
-        }
+        if (e.target.closest('.placed-field')) return;
         const rect = layer.getBoundingClientRect();
         const def = FIELD_DEFAULTS[fieldEditorState.activeType];
         let x = (e.clientX - rect.left) / rect.width - def.width / 2;
@@ -435,13 +509,16 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ signer_id: fieldEditorState.activeSignerId, field_type: fieldEditorState.activeType, page_index: pageIndex, x, y, width: def.width, height: def.height })
           });
-          refreshFieldOverlays();
+          await refreshFieldOverlays();
+          wireFieldDragging();
         } catch (err) {
           const errBox = document.getElementById('fieldEditorError');
           errBox.textContent = err.message || 'Could not place that field.'; errBox.style.display = 'block';
         }
       });
     });
+
+    wireFieldDragging();
 
     document.getElementById('btnSaveForLater').addEventListener('click', () => { STATE.screen = 'list'; render(); });
     document.getElementById('btnFinishSend').addEventListener('click', async () => {
