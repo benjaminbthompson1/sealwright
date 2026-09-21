@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const mammoth = require('mammoth');
 const { pool } = require('../db');
 const { sendMail } = require('../mailer');
-const { buildFinalPdf } = require('../pdf');
+const { buildFinalPdf, buildDocxDraftPdf } = require('../pdf');
 const { findUserById } = require('../auth');
 const { signRequestEmail, completionEmail } = require('../emailTemplates');
 
@@ -68,7 +68,7 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
     const sequential = req.body.sequential === 'true' || req.body.sequential === true;
     let signers;
     try { signers = JSON.parse(req.body.signers || '[]'); } catch (e) { return res.status(400).json({ error: 'Invalid signers payload' }); }
-    if (!Array.isArray(signers) || signers.length < 2) return res.status(400).json({ error: 'At least two signers are required' });
+    if (!Array.isArray(signers) || signers.length < 1) return res.status(400).json({ error: 'At least one signer is required' });
     for (const s of signers) {
       if (!s.name || !s.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.email)) {
         return res.status(400).json({ error: 'Every signer needs a name and a valid email' });
@@ -104,10 +104,16 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
 
     await client.query('BEGIN');
     const envelopeId = crypto.randomUUID();
+    // Field placement (docx only) needs the sender to see real, paginated
+    // pages before signers are notified — so this envelope is created in a
+    // 'preparing' state with no emails sent yet, and only flips to 'sent'
+    // once POST /envelopes/:id/send is called after fields are placed.
+    const prepareFields = sourceType === 'docx' && (req.body.prepareFields === 'true' || req.body.prepareFields === true);
+    const initialStatus = prepareFields ? 'preparing' : 'sent';
     const envRes = await client.query(
       `INSERT INTO envelopes (id, owner_id, title, source_type, file_name, mime_type, original_bytes, plain_text, sequential, current_turn_index, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'sent') RETURNING id, created_at`,
-      [envelopeId, req.session.userId, title, sourceType, fileName, mimeType, originalBytes, plainText, sequential]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10) RETURNING id, created_at`,
+      [envelopeId, req.session.userId, title, sourceType, fileName, mimeType, originalBytes, plainText, sequential, initialStatus]
     );
 
     if (sourceType === 'image') {
@@ -132,6 +138,12 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
       insertedSigners.push(r.rows[0]);
     }
 
+    if (prepareFields) {
+      await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), envelopeId, 'Envelope created — placing fields before sending.']);
+      await client.query('COMMIT');
+      return res.json({ id: envelopeId, status: 'preparing' });
+    }
+
     await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), envelopeId, 'Envelope created and sent for signature.']);
     await client.query('COMMIT');
 
@@ -151,6 +163,97 @@ router.post('/envelopes', upload.fields([{ name: 'document', maxCount: 1 }, { na
   } finally {
     client.release();
   }
+});
+
+// ---------- field placement (docx envelopes only, while status='preparing') ----------
+router.get('/envelopes/:id/draft-pdf', async (req, res) => {
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env || env.source_type !== 'docx') return res.status(404).end();
+  try {
+    const bytes = await buildDocxDraftPdf(env.plain_text);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.send(bytes);
+  } catch (err) {
+    console.error('draft pdf failed', err);
+    res.status(500).end();
+  }
+});
+
+router.get('/envelopes/:id/fields', async (req, res) => {
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).json({ error: 'Not authorized' });
+  const r = await pool.query('SELECT * FROM envelope_fields WHERE envelope_id=$1 ORDER BY page_index, y', [req.params.id]);
+  res.json(r.rows.map(f => ({
+    id: f.id, signer_id: f.signer_id, field_type: f.field_type, page_index: f.page_index,
+    x: f.x, y: f.y, width: f.width, height: f.height,
+    filled: !!(f.filled_image_bytes || f.filled_text !== null || f.filled_bool !== null),
+    filled_text: f.filled_text, filled_bool: f.filled_bool, has_filled_image: !!f.filled_image_bytes
+  })));
+});
+
+router.get('/envelopes/:id/fields/:fieldId/image', async (req, res) => {
+  const access = await resolveAccess(req, req.params.id);
+  if (!access.ok) return res.status(403).end();
+  const r = await pool.query('SELECT filled_image_bytes, filled_image_mime FROM envelope_fields WHERE id=$1 AND envelope_id=$2', [req.params.fieldId, req.params.id]);
+  if (!r.rows[0] || !r.rows[0].filled_image_bytes) return res.status(404).end();
+  res.setHeader('Content-Type', r.rows[0].filled_image_mime || 'image/png');
+  res.send(r.rows[0].filled_image_bytes);
+});
+
+const FIELD_TYPES = ['signature', 'initial', 'date', 'checkbox'];
+
+router.post('/envelopes/:id/fields', express.json(), async (req, res) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env || env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
+  if (env.status !== 'preparing') return res.status(400).json({ error: 'Fields can only be placed before sending' });
+  const { signer_id, field_type, page_index, x, y, width, height } = req.body || {};
+  if (!FIELD_TYPES.includes(field_type)) return res.status(400).json({ error: 'Invalid field type' });
+  const signerCheck = await pool.query('SELECT 1 FROM signers WHERE id=$1 AND envelope_id=$2', [signer_id, env.id]);
+  if (!signerCheck.rows.length) return res.status(400).json({ error: 'Invalid signer' });
+  const id = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO envelope_fields (id, envelope_id, signer_id, field_type, page_index, x, y, width, height)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id, env.id, signer_id, field_type, page_index, x, y, width, height]
+  );
+  res.json({ id });
+});
+
+router.delete('/envelopes/:id/fields/:fieldId', async (req, res) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env || env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
+  if (env.status !== 'preparing') return res.status(400).json({ error: 'Fields can only be edited before sending' });
+  await pool.query('DELETE FROM envelope_fields WHERE id=$1 AND envelope_id=$2', [req.params.fieldId, env.id]);
+  res.json({ deleted: true });
+});
+
+router.post('/envelopes/:id/send', express.json(), async (req, res) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env || env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
+  if (env.status !== 'preparing') return res.status(400).json({ error: 'This envelope has already been sent' });
+
+  const signers = await loadSigners(env.id);
+  const fieldsRes = await pool.query('SELECT signer_id FROM envelope_fields WHERE envelope_id=$1', [env.id]);
+  const signersWithFields = new Set(fieldsRes.rows.map(f => f.signer_id));
+  const missing = signers.filter(s => !signersWithFields.has(s.id));
+  if (missing.length) {
+    return res.status(400).json({ error: `Add at least one field for: ${missing.map(s => s.name).join(', ')}` });
+  }
+
+  await pool.query(`UPDATE envelopes SET status='sent' WHERE id=$1`, [env.id]);
+  await addAudit(env.id, 'Envelope sent for signature.');
+
+  const toEmail = env.sequential ? [signers[0]] : signers;
+  const senderName = await senderDisplayName(req.session.userId);
+  for (const s of toEmail) {
+    emailSignerTurn(req, env, s, senderName).catch(e => console.error('email failed', e.message));
+  }
+  res.json({ status: 'sent' });
 });
 
 // ---------- list ----------
@@ -287,14 +390,75 @@ router.get('/sign/:token/context', async (req, res) => {
   const env = await loadEnvelopeRow(signer.envelope_id);
   const signers = await loadSigners(env.id);
   const pages = await loadPages(env.id);
+  const fieldsRes = await pool.query('SELECT * FROM envelope_fields WHERE envelope_id=$1 ORDER BY page_index, y', [env.id]);
   const myTurn = !env.sequential || signer.order_index === env.current_turn_index;
   res.json({
     envelope: { id: env.id, title: env.title, source_type: env.source_type, file_name: env.file_name, sequential: env.sequential, status: env.status, page_count: pages.length },
     you: { id: signer.id, name: signer.name, email: signer.email, order_index: signer.order_index, status: signer.status },
     myTurn,
+    hasFields: fieldsRes.rows.length > 0,
+    fields: fieldsRes.rows.map(f => ({
+      id: f.id, signer_id: f.signer_id, field_type: f.field_type, page_index: f.page_index,
+      x: f.x, y: f.y, width: f.width, height: f.height,
+      filled_text: f.filled_text, filled_bool: f.filled_bool, has_filled_image: !!f.filled_image_bytes
+    })),
     signers: signers.map(s => ({ id: s.id, name: s.name, email: s.email, order_index: s.order_index, status: s.status, signed_at: s.signed_at, has_signature: !!s.signature_bytes }))
   });
 });
+
+async function finishSignerTurn(req, client, env, signer) {
+  let nextTurnIndex = env.current_turn_index;
+  if (env.sequential && signer.order_index === env.current_turn_index) {
+    nextTurnIndex = env.current_turn_index + 1;
+    await client.query('UPDATE envelopes SET current_turn_index=$1 WHERE id=$2', [nextTurnIndex, env.id]);
+  }
+
+  const remaining = await client.query(`SELECT count(*)::int AS n FROM signers WHERE envelope_id=$1 AND status<>'signed'`, [env.id]);
+  const allSigned = remaining.rows[0].n === 0;
+
+  if (allSigned) {
+    await client.query(`UPDATE envelopes SET status='completed', completed_at=now() WHERE id=$1`, [env.id]);
+    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, 'All parties signed. Document executed.']);
+  }
+  await client.query('COMMIT');
+
+  if (allSigned) {
+    const freshEnv = await loadEnvelopeRow(env.id);
+    const pages = await loadPages(env.id);
+    const signers = await loadSigners(env.id);
+    const fieldsRes = await pool.query('SELECT * FROM envelope_fields WHERE envelope_id=$1', [env.id]);
+    try {
+      const { bytes, fingerprint } = await buildFinalPdf(freshEnv, pages, signers, fieldsRes.rows);
+      await pool.query('UPDATE envelopes SET final_pdf_bytes=$1, fingerprint=$2 WHERE id=$3', [bytes, fingerprint, env.id]);
+      for (const s of signers) {
+        emailCompletion(req, freshEnv, s, bytes, fingerprint).catch(e => console.error('completion email failed', e.message));
+      }
+      // The creator gets a copy too, at the account email on file — unless
+      // that email already matches one of the signers above (e.g. someone
+      // signing their own single-party document), which would double-send.
+      if (freshEnv.owner_id) {
+        const owner = await findUserById(freshEnv.owner_id);
+        const alreadyEmailed = owner && signers.some(s => s.email.toLowerCase() === owner.email.toLowerCase());
+        if (owner && !alreadyEmailed) {
+          emailCompletion(req, freshEnv, { name: owner.first_name || 'there', email: owner.email }, bytes, fingerprint)
+            .catch(e => console.error('creator completion email failed', e.message));
+        }
+      }
+    } catch (err) {
+      console.error('final pdf assembly failed', err);
+      await addAudit(env.id, 'The final PDF could not be fully assembled: ' + err.message);
+    }
+    return { allSigned: true };
+  }
+  if (env.sequential) {
+    const nextSigner = (await loadSigners(env.id)).find(s => s.order_index === nextTurnIndex);
+    if (nextSigner) {
+      const senderName = await senderDisplayName(env.owner_id);
+      emailSignerTurn(req, env, nextSigner, senderName).catch(e => console.error('email failed', e.message));
+    }
+  }
+  return { allSigned: false };
+}
 
 // ---------- public: submit signature ----------
 router.post('/sign/:token', upload.single('signature'), async (req, res) => {
@@ -320,49 +484,65 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
     );
     await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, `${signer.name} signed via ${req.body.method || 'electronic signature'}.`]);
 
-    let nextTurnIndex = env.current_turn_index;
-    if (env.sequential && signer.order_index === env.current_turn_index) {
-      nextTurnIndex = env.current_turn_index + 1;
-      await client.query('UPDATE envelopes SET current_turn_index=$1 WHERE id=$2', [nextTurnIndex, env.id]);
-    }
-
-    const remaining = await client.query(`SELECT count(*)::int AS n FROM signers WHERE envelope_id=$1 AND status<>'signed'`, [env.id]);
-    const allSigned = remaining.rows[0].n === 0;
-
-    if (allSigned) {
-      await client.query(`UPDATE envelopes SET status='completed', completed_at=now() WHERE id=$1`, [env.id]);
-      await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, 'All parties signed. Document executed.']);
-    }
-    await client.query('COMMIT');
-
-    if (allSigned) {
-      const freshEnv = await loadEnvelopeRow(env.id);
-      const pages = await loadPages(env.id);
-      const signers = await loadSigners(env.id);
-      try {
-        const { bytes, fingerprint } = await buildFinalPdf(freshEnv, pages, signers);
-        await pool.query('UPDATE envelopes SET final_pdf_bytes=$1, fingerprint=$2 WHERE id=$3', [bytes, fingerprint, env.id]);
-        for (const s of signers) {
-          emailCompletion(req, freshEnv, s, bytes, fingerprint).catch(e => console.error('completion email failed', e.message));
-        }
-      } catch (err) {
-        console.error('final pdf assembly failed', err);
-        await addAudit(env.id, 'The final PDF could not be fully assembled: ' + err.message);
-      }
-      return res.json({ status: 'signed', allSigned: true });
-    } else if (env.sequential) {
-      const nextSigner = (await loadSigners(env.id)).find(s => s.order_index === nextTurnIndex);
-      if (nextSigner) {
-        const senderName = await senderDisplayName(env.owner_id);
-        emailSignerTurn(req, env, nextSigner, senderName).catch(e => console.error('email failed', e.message));
-      }
-    }
-
-    res.json({ status: 'signed', allSigned: false });
+    const result = await finishSignerTurn(req, client, env, signer);
+    res.json({ status: 'signed', allSigned: result.allSigned });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('sign failed', err);
     res.status(500).json({ error: 'Could not record signature' });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------- public: submit placed fields (docx envelopes that used field placement) ----------
+router.post('/sign/:token/fields', upload.any(), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const sr = await client.query('SELECT * FROM signers WHERE sign_token=$1 FOR UPDATE', [req.params.token]);
+    const signer = sr.rows[0];
+    if (!signer) return res.status(404).json({ error: 'Invalid or expired link' });
+    if (signer.status === 'signed') return res.status(409).json({ error: 'Already signed' });
+
+    const envRes = await client.query('SELECT * FROM envelopes WHERE id=$1 FOR UPDATE', [signer.envelope_id]);
+    const env = envRes.rows[0];
+    if (env.sequential && signer.order_index !== env.current_turn_index) {
+      return res.status(403).json({ error: 'It is not your turn yet' });
+    }
+    if (req.body.consent !== 'true') return res.status(400).json({ error: 'Consent is required' });
+
+    const fieldsRes = await client.query('SELECT * FROM envelope_fields WHERE envelope_id=$1 AND signer_id=$2', [env.id, signer.id]);
+    const myFields = fieldsRes.rows;
+    if (!myFields.length) return res.status(400).json({ error: 'No fields are assigned to you on this document' });
+
+    const filesByName = {};
+    for (const f of (req.files || [])) filesByName[f.fieldname] = f;
+
+    await client.query('BEGIN');
+    for (const field of myFields) {
+      if (field.field_type === 'signature' || field.field_type === 'initial') {
+        const file = filesByName['image_' + field.id];
+        if (!file) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Please fill every ${field.field_type} field` }); }
+        await client.query('UPDATE envelope_fields SET filled_image_bytes=$1, filled_image_mime=$2, filled_at=now() WHERE id=$3', [file.buffer, file.mimetype, field.id]);
+      } else if (field.field_type === 'date') {
+        const text = (req.body['text_' + field.id] || '').trim();
+        if (!text) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Please fill every date field' }); }
+        await client.query('UPDATE envelope_fields SET filled_text=$1, filled_at=now() WHERE id=$2', [text, field.id]);
+      } else if (field.field_type === 'checkbox') {
+        const boolVal = req.body['bool_' + field.id] === 'true';
+        await client.query('UPDATE envelope_fields SET filled_bool=$1, filled_at=now() WHERE id=$2', [boolVal, field.id]);
+      }
+    }
+
+    await client.query(`UPDATE signers SET status='signed', signed_at=now(), method=$1 WHERE id=$2`, ['placed fields', signer.id]);
+    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, `${signer.name} completed their fields.`]);
+
+    const result = await finishSignerTurn(req, client, env, signer);
+    res.json({ status: 'signed', allSigned: result.allSigned });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('field sign failed', err);
+    res.status(500).json({ error: 'Could not record your fields' });
   } finally {
     client.release();
   }
