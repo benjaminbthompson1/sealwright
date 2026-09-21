@@ -113,6 +113,18 @@ CREATE TABLE IF NOT EXISTS envelope_fields (
   filled_at TIMESTAMPTZ
 );
 
+-- Signers aren't necessarily platform accounts, so saved signatures/initials
+-- are keyed by email (lowercased) rather than a user_id — this works for
+-- every signer regardless of whether they ever sign up for Toolkit AI.
+CREATE TABLE IF NOT EXISTS saved_signatures (
+  email TEXT PRIMARY KEY,
+  signature_bytes BYTEA,
+  signature_mime TEXT,
+  initial_bytes BYTEA,
+  initial_mime TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_signers_envelope ON signers(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_pages_envelope ON envelope_pages(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_audit_envelope ON audit_log(envelope_id);
