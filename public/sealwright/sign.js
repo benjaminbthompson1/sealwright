@@ -7,6 +7,11 @@
   let activeMethod = 'draw', activeFont = "'Dancing Script', cursive", uploadedDataUrl = null;
   let padCtx = null, padHasInk = false, padDrawing = false;
 
+  // Once any signature/initial field is filled by any method within this
+  // document, remember it here so the NEXT field of the same type can be
+  // filled with one click instead of drawing/typing/uploading all over again.
+  let sessionFillCache = { signature: null, initial: null }; // {kind:'useSaved'} | {kind:'image', blob, previewUrl}
+
   // ---------------- field-based fill-in view ----------------
   const FIELD_LABELS = { signature: 'Signature', initial: 'Initials', date: 'Date', checkbox: 'Checkbox' };
   let fillValues = {}; // { [fieldId]: {kind:'image', blob} | {kind:'text', value} | {kind:'bool', value} }
@@ -34,6 +39,7 @@
       </div>`).join('') : `<div class="doc-fallback">Preview unavailable</div>`;
 
     const allMineFilled = myFields.every(f => fillValues[f.id] || f.filled_text !== null || f.filled_bool !== null || f.has_filled_image);
+    const hasImageFields = myFields.some(f => f.field_type === 'signature' || f.field_type === 'initial');
 
     app.innerHTML = `${topbar()}<div class="page-card">
       <h2 class="section-title">${escapeHtml(env.title)}</h2>
@@ -42,6 +48,9 @@
       <div class="doc-preview" id="fieldFillPages" style="background:#EFEAE0;">${pagesHtml}</div>
       <div id="fillPanelHost"></div>
       ${canAct ? `
+        ${hasImageFields ? `<label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px;">
+          <input type="checkbox" id="fillSaveForFutureChk"> Save my signature and initials for future documents
+        </label>` : ''}
         <div class="consent"><input type="checkbox" id="fillConsentChk">
           <span>I intend the fields I've filled as my electronic signature and agree they're legally binding for "${escapeHtml(env.title)}", signed on ${todayLabel()}.</span></div>
         <div id="fillSubmitError" class="warn-text" style="display:none;"></div>
@@ -67,6 +76,8 @@
       content = `<img src="/sealwright/api/envelopes/${ctx.envelope.id}/fields/${f.id}/image?token=${TOKEN}" style="max-width:100%; max-height:100%;">`;
     } else if (fillValues[f.id] && fillValues[f.id].kind === 'image') {
       content = `<img src="${fillValues[f.id].previewUrl}" style="max-width:100%; max-height:100%;">`;
+    } else if (fillValues[f.id] && fillValues[f.id].kind === 'useSaved') {
+      content = `<img src="/sealwright/api/sign/${TOKEN}/saved-image?type=${f.field_type === 'initial' ? 'initial' : 'signature'}" style="max-width:100%; max-height:100%;">`;
     }
     const clickable = isMine && canAct && !filled;
     return `<div class="fill-field ${clickable ? 'fill-field-clickable' : ''}" data-field-id="${f.id}" data-field-type="${f.field_type}"
@@ -96,7 +107,7 @@
     window._sealwrightUpdateSubmitEnabled = updateSubmitEnabled;
   }
 
-  function openFillPanel(fieldId, fieldType, env, you, myFields) {
+  function openFillPanel(fieldId, fieldType, env, you, myFields, forceFullPanel) {
     activeFillField = fieldId;
     const host = document.getElementById('fillPanelHost');
     if (fieldType === 'checkbox') {
@@ -121,7 +132,42 @@
       document.getElementById('btnCancelFill').addEventListener('click', () => { host.innerHTML = ''; });
       return;
     }
-    // signature / initial — reuse the same draw/type/upload pattern as the classic flow
+
+    // signature / initial — offer a one-click reuse first: whatever was used
+    // earlier for this same type in THIS document takes priority (most
+    // relevant), falling back to a signature/initials saved from a previous
+    // document if this is the first field of that type encountered here.
+    const cacheKey = fieldType === 'initial' ? 'initial' : 'signature';
+    const hasServerSaved = fieldType === 'initial' ? (ctx.savedSignature && ctx.savedSignature.hasInitial) : (ctx.savedSignature && ctx.savedSignature.hasSignature);
+    const quickFill = sessionFillCache[cacheKey] || (hasServerSaved ? { kind: 'useSaved' } : null);
+
+    if (quickFill && !forceFullPanel) {
+      const previewSrc = quickFill.kind === 'useSaved'
+        ? `/sealwright/api/sign/${TOKEN}/saved-image?type=${cacheKey}`
+        : quickFill.previewUrl;
+      const label = sessionFillCache[cacheKey] ? `the ${FIELD_LABELS[fieldType].toLowerCase()} you just used` : `your saved ${FIELD_LABELS[fieldType].toLowerCase()}`;
+      host.innerHTML = `<div class="sig-block is-active" style="margin-top:14px;">
+        <div style="font-weight:600; margin-bottom:8px;">${FIELD_LABELS[fieldType]}</div>
+        <img class="sig-img" src="${previewSrc}">
+        <p class="faint" style="margin-top:6px;">Use ${label}?</p>
+        <div style="margin-top:10px;">
+          <button class="btn btn-primary btn-sm" id="btnUseQuickFill">Use this</button>
+          <button class="btn btn-ghost btn-sm" id="btnDrawDifferent">Use a different one</button>
+          <button class="btn btn-ghost btn-sm" id="btnCancelFill">Cancel</button>
+        </div>
+      </div>`;
+      document.getElementById('btnUseQuickFill').addEventListener('click', () => {
+        fillValues[fieldId] = quickFill.kind === 'useSaved' ? { kind: 'useSaved' } : quickFill;
+        sessionFillCache[cacheKey] = fillValues[fieldId];
+        host.innerHTML = '';
+        renderFieldFillView(env, you);
+      });
+      document.getElementById('btnDrawDifferent').addEventListener('click', () => openFillPanel(fieldId, fieldType, env, you, myFields, true));
+      document.getElementById('btnCancelFill').addEventListener('click', () => { host.innerHTML = ''; });
+      return;
+    }
+
+    // full draw/type/upload panel — same pattern as the classic flow
     fillActiveMethod = 'draw'; fillPadHasInk = false; fillUploadedDataUrl = null;
     host.innerHTML = `<div class="sig-block is-active" style="margin-top:14px;">
       <div style="font-weight:600; margin-bottom:8px;">${FIELD_LABELS[fieldType]}</div>
@@ -187,6 +233,7 @@
         dataUrl = renderTypedSignatureImage(text, "'Dancing Script', cursive");
       } else dataUrl = fillUploadedDataUrl;
       fillValues[fieldId] = { kind: 'image', blob: dataUrlToBlob(dataUrl), previewUrl: dataUrl };
+      sessionFillCache[cacheKey] = fillValues[fieldId];
       host.innerHTML = '';
       renderFieldFillView(env, you);
     });
@@ -205,10 +252,13 @@
     btn.disabled = true; btn.textContent = 'Submitting…';
     const fd = new FormData();
     fd.append('consent', 'true');
+    const saveChk = document.getElementById('fillSaveForFutureChk');
+    if (saveChk && saveChk.checked) fd.append('saveForFuture', 'true');
     for (const f of myFields) {
       const v = fillValues[f.id];
       if (!v) continue; // already filled server-side from an earlier partial attempt
       if (v.kind === 'image') fd.append('image_' + f.id, v.blob, 'field.png');
+      else if (v.kind === 'useSaved') fd.append('useSaved_' + f.id, 'true');
       else if (v.kind === 'text') fd.append('text_' + f.id, v.value);
       else if (v.kind === 'bool') fd.append('bool_' + f.id, v.value ? 'true' : 'false');
     }
@@ -217,6 +267,7 @@
       if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || 'Could not submit your fields.'); }
       const result = await res.json();
       fillValues = {};
+      sessionFillCache = { signature: null, initial: null };
       if (result.allSigned) showSealed(env);
       else { await load(); }
     } catch (e) {
@@ -292,12 +343,18 @@
   }
 
   function signingPanelHtml(env, you) {
+    const hasSaved = ctx.savedSignature && ctx.savedSignature.hasSignature;
     return `<div class="sign-method-tabs">
-      <button class="tab-btn method-tab active" data-method="draw">Draw</button>
+      ${hasSaved ? '<button class="tab-btn method-tab active" data-method="saved">Use saved signature</button>' : ''}
+      <button class="tab-btn method-tab ${hasSaved ? '' : 'active'}" data-method="draw">Draw</button>
       <button class="tab-btn method-tab" data-method="type">Type</button>
       <button class="tab-btn method-tab" data-method="upload">Upload image</button>
     </div>
-    <div class="method-panel" data-panel="draw"><canvas class="pad" id="sigCanvas" width="420" height="150"></canvas>
+    ${hasSaved ? `<div class="method-panel" data-panel="saved">
+      <img class="sig-img" src="/sealwright/api/sign/${TOKEN}/saved-image?type=signature">
+      <p class="faint" style="margin-top:6px;">Your saved signature.</p>
+    </div>` : ''}
+    <div class="method-panel" data-panel="draw" style="display:${hasSaved ? 'none' : 'block'};"><canvas class="pad" id="sigCanvas" width="420" height="150"></canvas>
       <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" id="btnClearPad" type="button">Clear</button></div></div>
     <div class="method-panel" data-panel="type" style="display:none;">
       <div class="field"><input type="text" id="typedName" value="${escapeHtml(you.name)}" placeholder="Type your name"></div>
@@ -312,14 +369,18 @@
       <button class="btn btn-ghost btn-sm" id="btnPickSigImage" type="button">Choose an image file</button>
       <div id="uploadedSigPreview" style="margin-top:10px;"></div>
     </div>
+    <label id="saveForFutureRow" style="display:${hasSaved ? 'none' : 'flex'}; align-items:center; gap:8px; margin-top:14px; font-size:13px;">
+      <input type="checkbox" id="saveForFutureChk"> Save this as my signature for next time
+    </label>
     <div class="consent"><input type="checkbox" id="consentChk">
       <span>I intend this as my electronic signature and agree it's legally binding for "${escapeHtml(env.title)}", signed on ${todayLabel()}.</span></div>
     <div id="signError" class="warn-text" style="display:none;"></div>
-    <div style="margin-top:16px;"><button class="btn btn-primary" id="btnAdoptSign" disabled>Adopt &amp; sign</button></div>`;
+    <div style="margin-top:16px;"><button class="btn btn-primary" id="btnAdoptSign" ${hasSaved ? '' : 'disabled'}>Adopt &amp; sign</button></div>`;
   }
 
   function wirePanel(env, you) {
-    activeMethod = 'draw'; padHasInk = false; uploadedDataUrl = null;
+    const hasSaved = ctx.savedSignature && ctx.savedSignature.hasSignature;
+    activeMethod = hasSaved ? 'saved' : 'draw'; padHasInk = false; uploadedDataUrl = null;
     const canvas = document.getElementById('sigCanvas');
     if (canvas) {
       padCtx = canvas.getContext('2d');
@@ -345,6 +406,8 @@
         app.querySelectorAll('.method-tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         app.querySelectorAll('.method-panel').forEach(p => p.style.display = (p.getAttribute('data-panel') === method) ? 'block' : 'none');
+        const saveRow = document.getElementById('saveForFutureRow');
+        if (saveRow) saveRow.style.display = method === 'saved' ? 'none' : 'flex';
         updateEnabled();
       }
       const font = btn.getAttribute('data-font');
@@ -376,7 +439,8 @@
     function updateEnabled() {
       const consent = document.getElementById('consentChk') && document.getElementById('consentChk').checked;
       let ready = false;
-      if (activeMethod === 'draw') ready = padHasInk;
+      if (activeMethod === 'saved') ready = true;
+      else if (activeMethod === 'draw') ready = padHasInk;
       else if (activeMethod === 'type') ready = !!(document.getElementById('typedName') && document.getElementById('typedName').value.trim());
       else if (activeMethod === 'upload') ready = !!uploadedDataUrl;
       const btn = document.getElementById('btnAdoptSign');
@@ -399,21 +463,27 @@
     btn.disabled = true; btn.textContent = 'Signing…';
     let blob, method;
     try {
-      if (activeMethod === 'draw') {
-        method = 'drawn';
-        blob = await new Promise(resolve => document.getElementById('sigCanvas').toBlob(resolve, 'image/png'));
-      } else if (activeMethod === 'type') {
-        method = 'typed';
-        const text = document.getElementById('typedName').value.trim();
-        try { await document.fonts.load(`52px ${activeFont}`); } catch (e) {}
-        blob = dataUrlToBlob(renderTypedSignatureImage(text, activeFont));
-      } else if (activeMethod === 'upload') {
-        method = 'uploaded image';
-        blob = dataUrlToBlob(uploadedDataUrl);
-      }
       const fd = new FormData();
-      fd.append('signature', blob, 'signature.png');
-      fd.append('method', method);
+      if (activeMethod === 'saved') {
+        fd.append('useSaved', 'true');
+      } else {
+        if (activeMethod === 'draw') {
+          method = 'drawn';
+          blob = await new Promise(resolve => document.getElementById('sigCanvas').toBlob(resolve, 'image/png'));
+        } else if (activeMethod === 'type') {
+          method = 'typed';
+          const text = document.getElementById('typedName').value.trim();
+          try { await document.fonts.load(`52px ${activeFont}`); } catch (e) {}
+          blob = dataUrlToBlob(renderTypedSignatureImage(text, activeFont));
+        } else if (activeMethod === 'upload') {
+          method = 'uploaded image';
+          blob = dataUrlToBlob(uploadedDataUrl);
+        }
+        fd.append('signature', blob, 'signature.png');
+        fd.append('method', method);
+        const saveChk = document.getElementById('saveForFutureChk');
+        if (saveChk && saveChk.checked) fd.append('saveForFuture', 'true');
+      }
       fd.append('consent', 'true');
       const res = await fetch(`/sealwright/api/sign/${TOKEN}`, { method: 'POST', body: fd });
       if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || 'Could not record your signature.'); }
