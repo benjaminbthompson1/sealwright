@@ -7,6 +7,225 @@
   let activeMethod = 'draw', activeFont = "'Dancing Script', cursive", uploadedDataUrl = null;
   let padCtx = null, padHasInk = false, padDrawing = false;
 
+  // ---------------- field-based fill-in view ----------------
+  const FIELD_LABELS = { signature: 'Signature', initial: 'Initials', date: 'Date', checkbox: 'Checkbox' };
+  let fillValues = {}; // { [fieldId]: {kind:'image', blob} | {kind:'text', value} | {kind:'bool', value} }
+  let activeFillField = null;
+  let fillPadCtx = null, fillPadHasInk = false, fillActiveMethod = 'draw', fillUploadedDataUrl = null;
+
+  async function renderFieldFillView(env, you) {
+    const myFields = ctx.fields.filter(f => f.signer_id === you.id);
+    const canAct = ctx.myTurn && you.status !== 'signed';
+
+    let pageImages = [];
+    try {
+      const buf = await (await fetch(`/sealwright/api/envelopes/${env.id}/draft-pdf?token=${TOKEN}`)).arrayBuffer();
+      pageImages = await renderPdfPagesFromArrayBuffer(buf, 20);
+    } catch (e) { console.warn('draft pdf failed', e); }
+
+    const signerNames = {}; ctx.signers.forEach(s => { signerNames[s.id] = s.name; });
+
+    const pagesHtml = pageImages.length ? pageImages.map((src, i) => `
+      <div class="field-page" data-page-index="${i}" style="position:relative; display:block; margin:0 auto 16px; max-width:700px;">
+        <img src="${src}" style="display:block; width:100%; border:1px solid var(--paper-line);" draggable="false">
+        <div class="field-overlay-view" data-page-index="${i}" style="position:absolute; inset:0;">${
+          ctx.fields.filter(f => f.page_index === i).map(f => fieldBoxHtml(f, you, canAct, signerNames)).join('')
+        }</div>
+      </div>`).join('') : `<div class="doc-fallback">Preview unavailable</div>`;
+
+    const allMineFilled = myFields.every(f => fillValues[f.id] || f.filled_text !== null || f.filled_bool !== null || f.has_filled_image);
+
+    app.innerHTML = `${topbar()}<div class="page-card">
+      <h2 class="section-title">${escapeHtml(env.title)}</h2>
+      <p class="faint" style="margin-bottom:6px;">Viewing as ${escapeHtml(you.name)}</p>
+      ${!canAct ? `<div class="banner banner-info">${you.status === 'signed' ? 'You already completed your fields on this document.' : 'Waiting on an earlier signer before it\'s your turn.'}</div>` : `<p class="faint" style="margin-bottom:14px;">Fields with your name are yours to fill — click one to get started. Other signers' fields are shown for reference.</p>`}
+      <div class="doc-preview" id="fieldFillPages" style="background:#EFEAE0;">${pagesHtml}</div>
+      <div id="fillPanelHost"></div>
+      ${canAct ? `
+        <div class="consent"><input type="checkbox" id="fillConsentChk">
+          <span>I intend the fields I've filled as my electronic signature and agree they're legally binding for "${escapeHtml(env.title)}", signed on ${todayLabel()}.</span></div>
+        <div id="fillSubmitError" class="warn-text" style="display:none;"></div>
+        <div style="margin-top:16px;"><button class="btn btn-primary" id="btnSubmitFields" ${allMineFilled ? '' : 'disabled'}>Submit</button></div>
+      ` : ''}
+    </div>`;
+
+    if (canAct) wireFieldFillView(env, you, myFields);
+  }
+
+  function fieldBoxHtml(f, you, canAct, signerNames) {
+    const isMine = f.signer_id === you.id;
+    const filled = fillValues[f.id] || f.filled_text !== null || f.filled_bool !== null || f.has_filled_image;
+    const label = FIELD_LABELS[f.field_type];
+    const color = isMine ? '#8C2F39' : '#8B968F';
+    let content = '';
+    if (f.field_type === 'checkbox') {
+      const checked = fillValues[f.id] ? fillValues[f.id].value : f.filled_bool;
+      content = checked ? '✕' : '';
+    } else if (f.field_type === 'date') {
+      content = fillValues[f.id] ? escapeHtml(fillValues[f.id].value) : escapeHtml(f.filled_text || '');
+    } else if (f.has_filled_image) {
+      content = `<img src="/sealwright/api/envelopes/${ctx.envelope.id}/fields/${f.id}/image?token=${TOKEN}" style="max-width:100%; max-height:100%;">`;
+    } else if (fillValues[f.id] && fillValues[f.id].kind === 'image') {
+      content = `<img src="${fillValues[f.id].previewUrl}" style="max-width:100%; max-height:100%;">`;
+    }
+    const clickable = isMine && canAct && !filled;
+    return `<div class="fill-field ${clickable ? 'fill-field-clickable' : ''}" data-field-id="${f.id}" data-field-type="${f.field_type}"
+      style="position:absolute; left:${f.x * 100}%; top:${f.y * 100}%; width:${f.width * 100}%; height:${f.height * 100}%;
+      border:2px ${isMine ? 'solid' : 'dashed'} ${color}; background:${filled ? 'transparent' : color + '15'};
+      border-radius:3px; ${clickable ? 'cursor:pointer;' : ''} display:flex; align-items:center; justify-content:center; overflow:hidden;">
+      ${content || (isMine ? `<span style="font-size:10px; font-weight:700; color:${color};">${label}</span>` : `<span style="font-size:9px; color:${color};">${escapeHtml((signerNames[f.signer_id] || '').split(' ')[0])}</span>`)}
+    </div>`;
+  }
+
+  function wireFieldFillView(env, you, myFields) {
+    app.querySelectorAll('.fill-field-clickable').forEach(box => {
+      box.addEventListener('click', () => openFillPanel(box.getAttribute('data-field-id'), box.getAttribute('data-field-type'), env, you, myFields));
+    });
+    const btnSubmit = document.getElementById('btnSubmitFields');
+    if (btnSubmit) btnSubmit.addEventListener('click', () => submitFields(env, myFields));
+    const consentChk = document.getElementById('fillConsentChk');
+    if (consentChk) consentChk.addEventListener('change', updateSubmitEnabled);
+    updateSubmitEnabled();
+
+    function updateSubmitEnabled() {
+      const allFilled = myFields.every(f => fillValues[f.id] || f.filled_text !== null || f.filled_bool !== null || f.has_filled_image);
+      const consent = document.getElementById('fillConsentChk') && document.getElementById('fillConsentChk').checked;
+      const btn = document.getElementById('btnSubmitFields');
+      if (btn) btn.disabled = !(allFilled && consent);
+    }
+    window._sealwrightUpdateSubmitEnabled = updateSubmitEnabled;
+  }
+
+  function openFillPanel(fieldId, fieldType, env, you, myFields) {
+    activeFillField = fieldId;
+    const host = document.getElementById('fillPanelHost');
+    if (fieldType === 'checkbox') {
+      const current = fillValues[fieldId] ? fillValues[fieldId].value : false;
+      fillValues[fieldId] = { kind: 'bool', value: !current };
+      renderFieldFillView(env, you); // cheap full refresh; keeps this simple and correct
+      return;
+    }
+    if (fieldType === 'date') {
+      host.innerHTML = `<div class="sig-block is-active" style="margin-top:14px;">
+        <div style="font-weight:600; margin-bottom:8px;">Enter a date</div>
+        <input type="text" id="dateFillInput" placeholder="MM/DD/YYYY" value="${fillValues[fieldId] ? escapeHtml(fillValues[fieldId].value) : todayLabel()}" style="padding:9px 12px; border:1.5px solid var(--paper-line); border-radius:4px; font-size:14px; width:200px;">
+        <div style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="btnSaveDate">Use this date</button> <button class="btn btn-ghost btn-sm" id="btnCancelFill">Cancel</button></div>
+      </div>`;
+      document.getElementById('btnSaveDate').addEventListener('click', () => {
+        const val = document.getElementById('dateFillInput').value.trim();
+        if (!val) return;
+        fillValues[fieldId] = { kind: 'text', value: val };
+        host.innerHTML = '';
+        renderFieldFillView(env, you);
+      });
+      document.getElementById('btnCancelFill').addEventListener('click', () => { host.innerHTML = ''; });
+      return;
+    }
+    // signature / initial — reuse the same draw/type/upload pattern as the classic flow
+    fillActiveMethod = 'draw'; fillPadHasInk = false; fillUploadedDataUrl = null;
+    host.innerHTML = `<div class="sig-block is-active" style="margin-top:14px;">
+      <div style="font-weight:600; margin-bottom:8px;">${FIELD_LABELS[fieldType]}</div>
+      <div class="sign-method-tabs">
+        <button class="tab-btn fill-method-tab active" data-method="draw" type="button">Draw</button>
+        <button class="tab-btn fill-method-tab" data-method="type" type="button">Type</button>
+        <button class="tab-btn fill-method-tab" data-method="upload" type="button">Upload image</button>
+      </div>
+      <div class="fill-method-panel" data-panel="draw"><canvas class="pad" id="fillCanvas" width="360" height="120"></canvas>
+        <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" id="btnClearFillPad" type="button">Clear</button></div></div>
+      <div class="fill-method-panel" data-panel="type" style="display:none;">
+        <div class="field"><input type="text" id="fillTypedName" value="${escapeHtml(you.name)}"></div>
+        <div class="typed-preview" id="fillTypedPreview" style="font-family:'Dancing Script', cursive; font-size:30px;">${escapeHtml(you.name)}</div>
+      </div>
+      <div class="fill-method-panel" data-panel="upload" style="display:none;">
+        <input type="file" id="fillUploadInput" accept="image/*" style="display:none">
+        <button class="btn btn-ghost btn-sm" id="btnPickFillImage" type="button">Choose an image file</button>
+        <div id="fillUploadedPreview" style="margin-top:8px;"></div>
+      </div>
+      <div style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="btnUseFillValue" disabled>Use this ${FIELD_LABELS[fieldType].toLowerCase()}</button> <button class="btn btn-ghost btn-sm" id="btnCancelFill">Cancel</button></div>
+    </div>`;
+
+    const canvas = document.getElementById('fillCanvas');
+    fillPadCtx = canvas.getContext('2d');
+    fillPadCtx.lineWidth = 2; fillPadCtx.lineCap = 'round'; fillPadCtx.strokeStyle = '#1C2B3A';
+    function pos(e) {
+      const r = canvas.getBoundingClientRect();
+      const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+      const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+      return { x: cx * (canvas.width / r.width), y: cy * (canvas.height / r.height) };
+    }
+    function start(e) { e.preventDefault(); fillPadCtx._drawing = true; const p = pos(e); fillPadCtx.beginPath(); fillPadCtx.moveTo(p.x, p.y); }
+    function move(e) { if (!fillPadCtx._drawing) return; e.preventDefault(); const p = pos(e); fillPadCtx.lineTo(p.x, p.y); fillPadCtx.stroke(); fillPadHasInk = true; updateUseEnabled(); }
+    function end() { fillPadCtx._drawing = false; }
+    canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', move); window.addEventListener('mouseup', end);
+    canvas.addEventListener('touchstart', start, { passive: false }); canvas.addEventListener('touchmove', move, { passive: false }); canvas.addEventListener('touchend', end);
+    document.getElementById('btnClearFillPad').addEventListener('click', () => { fillPadCtx.clearRect(0, 0, canvas.width, canvas.height); fillPadHasInk = false; updateUseEnabled(); });
+
+    host.querySelectorAll('.fill-method-tab').forEach(btn => btn.addEventListener('click', () => {
+      fillActiveMethod = btn.getAttribute('data-method');
+      host.querySelectorAll('.fill-method-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      host.querySelectorAll('.fill-method-panel').forEach(p => p.style.display = p.getAttribute('data-panel') === fillActiveMethod ? 'block' : 'none');
+      updateUseEnabled();
+    }));
+    document.getElementById('fillTypedName').addEventListener('input', e => { document.getElementById('fillTypedPreview').textContent = e.target.value; updateUseEnabled(); });
+    document.getElementById('btnPickFillImage').addEventListener('click', () => document.getElementById('fillUploadInput').click());
+    document.getElementById('fillUploadInput').onchange = async (e) => {
+      if (e.target.files[0]) {
+        const raw = await window.Sealwright.readFileAsDataURL(e.target.files[0]);
+        fillUploadedDataUrl = await window.Sealwright.downscaleImage(raw, 400);
+        document.getElementById('fillUploadedPreview').innerHTML = `<img class="sig-img" src="${fillUploadedDataUrl}">`;
+        updateUseEnabled();
+      }
+    };
+    document.getElementById('btnCancelFill').addEventListener('click', () => { host.innerHTML = ''; });
+    document.getElementById('btnUseFillValue').addEventListener('click', async () => {
+      let dataUrl;
+      if (fillActiveMethod === 'draw') dataUrl = canvas.toDataURL('image/png');
+      else if (fillActiveMethod === 'type') {
+        const text = document.getElementById('fillTypedName').value.trim();
+        try { await document.fonts.load(`40px 'Dancing Script'`); } catch (e) {}
+        dataUrl = renderTypedSignatureImage(text, "'Dancing Script', cursive");
+      } else dataUrl = fillUploadedDataUrl;
+      fillValues[fieldId] = { kind: 'image', blob: dataUrlToBlob(dataUrl), previewUrl: dataUrl };
+      host.innerHTML = '';
+      renderFieldFillView(env, you);
+    });
+
+    function updateUseEnabled() {
+      let ready = false;
+      if (fillActiveMethod === 'draw') ready = fillPadHasInk;
+      else if (fillActiveMethod === 'type') ready = !!document.getElementById('fillTypedName').value.trim();
+      else if (fillActiveMethod === 'upload') ready = !!fillUploadedDataUrl;
+      document.getElementById('btnUseFillValue').disabled = !ready;
+    }
+  }
+
+  async function submitFields(env, myFields) {
+    const btn = document.getElementById('btnSubmitFields');
+    btn.disabled = true; btn.textContent = 'Submitting…';
+    const fd = new FormData();
+    fd.append('consent', 'true');
+    for (const f of myFields) {
+      const v = fillValues[f.id];
+      if (!v) continue; // already filled server-side from an earlier partial attempt
+      if (v.kind === 'image') fd.append('image_' + f.id, v.blob, 'field.png');
+      else if (v.kind === 'text') fd.append('text_' + f.id, v.value);
+      else if (v.kind === 'bool') fd.append('bool_' + f.id, v.value ? 'true' : 'false');
+    }
+    try {
+      const res = await fetch(`/sealwright/api/sign/${TOKEN}/fields`, { method: 'POST', body: fd });
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || 'Could not submit your fields.'); }
+      const result = await res.json();
+      fillValues = {};
+      if (result.allSigned) showSealed(env);
+      else { await load(); }
+    } catch (e) {
+      const errBox = document.getElementById('fillSubmitError');
+      if (errBox) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      btn.disabled = false; btn.textContent = 'Submit';
+    }
+  }
+
   async function load() {
     try {
       const res = await fetch(`/sealwright/api/sign/${TOKEN}/context`);
@@ -25,6 +244,7 @@
 
   function render() {
     const env = ctx.envelope, you = ctx.you;
+    if (ctx.hasFields) { renderFieldFillView(env, you); return; }
     const blocks = ctx.signers.map(s => {
       const isYou = s.id === you.id;
       let statusHtml;
