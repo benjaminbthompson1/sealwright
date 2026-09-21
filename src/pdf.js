@@ -96,9 +96,20 @@ async function stampField(pdfDoc, page, pageWidth, pageHeight, helv, field) {
       const drawW = img.width * scale, drawH = img.height * scale;
       page.drawImage(img, { x: xPts + (wPts - drawW) / 2, y: yPts + (hPts - drawH) / 2, width: drawW, height: drawH });
     } catch (err) { console.warn('stamp signature/initial field failed', err.message); }
-  } else if (field.field_type === 'date') {
-    const size = Math.max(8, Math.min(hPts * 0.6, 12));
-    page.drawText(field.filled_text || '', { x: xPts + 2, y: yPts + (hPts - size) / 2, size, font: helv, color: rgb(0.11, 0.17, 0.23) });
+  } else if (field.field_type === 'date' || field.field_type === 'title') {
+    const text = field.filled_text || '';
+    const maxTextWidth = Math.max(4, wPts - 4);
+    let size = Math.max(6, Math.min(hPts * 0.65, 12));
+    // The previous version only sized to the box's HEIGHT, so a longer date
+    // or title could run past the right edge of a narrow box. Shrinking
+    // further until the actual text metrics fit the box's WIDTH too fixes that.
+    while (size > 6) {
+      let w;
+      try { w = helv.widthOfTextAtSize(text, size); } catch (e) { w = text.length * size * 0.5; }
+      if (w <= maxTextWidth) break;
+      size -= 0.5;
+    }
+    page.drawText(text, { x: xPts + 2, y: yPts + (hPts - size) / 2, size, font: helv, color: rgb(0.11, 0.17, 0.23) });
   } else if (field.field_type === 'checkbox') {
     page.drawRectangle({ x: xPts, y: yPts, width: wPts, height: hPts, borderColor: rgb(0.11, 0.17, 0.23), borderWidth: 1 });
     if (field.filled_bool) {
