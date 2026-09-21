@@ -330,6 +330,7 @@
     signature: { width: 0.22, height: 0.045, label: 'Signature' },
     initial: { width: 0.08, height: 0.035, label: 'Initials' },
     date: { width: 0.14, height: 0.03, label: 'Date' },
+    title: { width: 0.18, height: 0.03, label: 'Title' },
     checkbox: { width: 0.025, height: 0.02, label: 'Checkbox' }
   };
   const SIGNER_COLORS = ['#8C2F39', '#2F6B8C', '#3F6C51', '#A9803F', '#6B4C9A', '#B0554A'];
