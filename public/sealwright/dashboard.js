@@ -5,7 +5,7 @@
   const STATE = { screen: 'list', envelopes: [], draft: null, currentId: null };
 
   function blankDraft() {
-    return { title: '', sourceType: null, fileName: '', docFile: null, pageFiles: [], previewImages: [], htmlPreview: null, signers: [], sequential: true, _uploadTab: 'file' };
+    return { title: '', sourceType: null, fileName: '', docFile: null, pageFiles: [], previewImages: [], htmlPreview: null, signers: [], sequential: true, _uploadTab: 'file', prepareFields: false };
   }
 
   function topbar() {
@@ -34,12 +34,14 @@
     else if (STATE.screen === 'new-upload') html += renderNewUpload();
     else if (STATE.screen === 'new-signers') html += renderNewSigners();
     else if (STATE.screen === 'new-review') html += renderNewReview();
+    else if (STATE.screen === 'field-editor') html += await renderFieldEditor();
     else if (STATE.screen === 'detail') html += await renderDetail();
     app.innerHTML = html;
     wireGlobal();
     if (STATE.screen === 'new-upload') wireUpload();
     if (STATE.screen === 'new-signers') wireSigners();
     if (STATE.screen === 'new-review') wireReview();
+    if (STATE.screen === 'field-editor') wireFieldEditor();
     if (STATE.screen === 'detail') wireDetail();
   }
 
@@ -61,7 +63,7 @@
         let cls = 'dot'; if (s.status === 'signed') cls += ' signed'; else if (env.sequential && s.order_index === env.current_turn_index) cls += ' turn';
         return `<span class="${cls}" title="${escapeHtml(s.name)}"></span>`;
       }).join('');
-      const badge = env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : '<span class="badge badge-progress">In progress</span>';
+      const badge = env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : env.status === 'preparing' ? '<span class="badge badge-progress">Draft — placing fields</span>' : '<span class="badge badge-progress">In progress</span>';
       const recipientBadge = env.is_owner === false ? '<span class="badge" style="background:var(--brass-tint); color:var(--brass);">Sent to you</span>' : '';
       return `<div class="env-row" data-id="${env.id}">
         <div class="env-row-main"><h3>${escapeHtml(env.title)}</h3>
@@ -115,11 +117,18 @@
     } else if (d.sourceType === 'image') {
       inner = d.previewImages.map(src => `<img class="doc-page-img" src="${src}">`).join('');
     }
+    const fieldsToggle = d.sourceType === 'docx' ? `
+      <div class="toggle-row">
+        <label class="switch"><input type="checkbox" id="prepareFieldsToggle" ${d.prepareFields ? 'checked' : ''}><span class="slider"></span></label>
+        <div><div style="font-weight:600; font-size:13.5px;">Place signature, date, and checkbox fields on the document</div>
+        <div class="faint">Instead of a signature block at the end, drag fields onto the exact spots on the page. Word documents only.</div></div>
+      </div>` : '';
     return `<div class="file-chip">📎 ${escapeHtml(d.fileName)} <button class="link-btn" id="btnRemoveDoc" style="margin-left:6px;">Remove</button></div>
     <div class="doc-preview" style="margin-top:16px;">${inner}</div>
     ${d.sourceType === 'image' ? `<div style="text-align:center; margin-top:12px;"><button class="btn btn-ghost btn-sm" id="btnAddPage">Add another page</button></div>` : ''}
     <div class="field" style="margin-top:22px;"><label>Document title</label>
       <input type="text" id="draftTitle" value="${escapeHtml(d.title)}" placeholder="e.g. Consulting Agreement — Acme Corp"></div>
+    ${fieldsToggle}
     <div style="display:flex; justify-content:flex-end; margin-top:10px;"><button class="btn btn-primary" id="btnUploadContinue">Continue to signers</button></div>`;
   }
 
@@ -142,10 +151,11 @@
     const btnRemove = document.getElementById('btnRemoveDoc'); if (btnRemove) btnRemove.addEventListener('click', () => { STATE.draft = blankDraft(); render(); });
     const btnAddPage = document.getElementById('btnAddPage'); if (btnAddPage) btnAddPage.addEventListener('click', () => fInputCam.click());
     const titleInput = document.getElementById('draftTitle'); if (titleInput) titleInput.addEventListener('input', e => { d.title = e.target.value; });
+    const prepToggle = document.getElementById('prepareFieldsToggle'); if (prepToggle) prepToggle.addEventListener('change', e => { d.prepareFields = e.target.checked; });
     const btnCont = document.getElementById('btnUploadContinue');
     if (btnCont) btnCont.addEventListener('click', () => {
       if (!d.title.trim()) d.title = d.fileName || 'Untitled document';
-      if (!d.signers.length) d.signers = [{ name: '', email: '' }, { name: '', email: '' }];
+      if (!d.signers.length) d.signers = [{ name: '', email: '' }];
       STATE.screen = 'new-signers'; render();
     });
   }
@@ -234,7 +244,7 @@
       const errBox = document.getElementById('signerError');
       const filled = d.signers.filter(s => s.name.trim() && s.email.trim());
       const emailOk = filled.every(s => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.email.trim()));
-      if (d.signers.length < 2) { errBox.textContent = 'Add at least two signers for a multi-party envelope.'; errBox.style.display = 'block'; return; }
+      if (d.signers.length < 1) { errBox.textContent = 'Add at least one signer.'; errBox.style.display = 'block'; return; }
       if (filled.length !== d.signers.length) { errBox.textContent = 'Give every signer a name and an email address.'; errBox.style.display = 'block'; return; }
       if (!emailOk) { errBox.textContent = "One of the email addresses doesn't look valid."; errBox.style.display = 'block'; return; }
       errBox.style.display = 'none';
@@ -262,13 +272,35 @@
       <div id="sendError" class="warn-text" style="display:none;"></div>
       <hr class="hr"><div style="display:flex; justify-content:space-between;">
         <button class="btn btn-ghost" id="btnBackSigners">Back</button>
-        <button class="btn btn-primary" id="btnSendEnvelope">Send for signature</button></div>
+        <button class="btn btn-primary" id="btnSendEnvelope">${d.prepareFields ? 'Continue to place fields' : 'Send for signature'}</button></div>
     </div></div>`;
   }
 
   function wireReview() {
     document.getElementById('btnBackSigners').addEventListener('click', () => { STATE.screen = 'new-signers'; render(); });
-    document.getElementById('btnSendEnvelope').addEventListener('click', sendEnvelope);
+    document.getElementById('btnSendEnvelope').addEventListener('click', STATE.draft.prepareFields ? createEnvelopeForFieldPlacement : sendEnvelope);
+  }
+
+  async function createEnvelopeForFieldPlacement() {
+    const d = STATE.draft;
+    const btn = document.getElementById('btnSendEnvelope');
+    btn.disabled = true; btn.textContent = 'Preparing…';
+    const fd = new FormData();
+    fd.append('title', d.title);
+    fd.append('sequential', d.sequential ? 'true' : 'false');
+    fd.append('prepareFields', 'true');
+    fd.append('signers', JSON.stringify(d.signers.map(s => ({ name: s.name.trim(), email: s.email.trim() }))));
+    fd.append('document', d.docFile);
+    try {
+      const result = await api('/sealwright/api/envelopes', { method: 'POST', body: fd });
+      STATE.currentId = result.id;
+      STATE.screen = 'field-editor';
+      render();
+    } catch (e) {
+      const errBox = document.getElementById('sendError');
+      errBox.textContent = e.message || 'Could not create the envelope.'; errBox.style.display = 'block';
+      btn.disabled = false; btn.textContent = 'Continue to place fields';
+    }
   }
 
   async function sendEnvelope() {
@@ -291,6 +323,141 @@
       errBox.textContent = e.message || 'Could not send the envelope.'; errBox.style.display = 'block';
       btn.disabled = false; btn.textContent = 'Send for signature';
     }
+  }
+
+  // ---------------- field placement editor (docx envelopes only) ----------------
+  const FIELD_DEFAULTS = {
+    signature: { width: 0.22, height: 0.045, label: 'Signature' },
+    initial: { width: 0.08, height: 0.035, label: 'Initials' },
+    date: { width: 0.14, height: 0.03, label: 'Date' },
+    checkbox: { width: 0.025, height: 0.02, label: 'Checkbox' }
+  };
+  const SIGNER_COLORS = ['#8C2F39', '#2F6B8C', '#3F6C51', '#A9803F', '#6B4C9A', '#B0554A'];
+  let fieldEditorState = null; // { envelope, signers, pageImages, activeSignerId, activeType }
+
+  async function renderFieldEditor() {
+    let env;
+    try { env = await api('/sealwright/api/envelopes/' + STATE.currentId); } catch (e) { return `<p class="banner banner-warn">${escapeHtml(e.message)}</p>`; }
+    let pageImages = [];
+    try {
+      const buf = await (await fetch(`/sealwright/api/envelopes/${env.id}/draft-pdf`, { credentials: 'same-origin' })).arrayBuffer();
+      pageImages = await renderPdfPagesFromArrayBuffer(buf, 20);
+    } catch (e) { console.warn('draft pdf render failed', e); }
+
+    fieldEditorState = {
+      envelope: env, signers: env.signers, pageImages,
+      activeSignerId: env.signers[0] && env.signers[0].id,
+      activeType: 'signature'
+    };
+
+    const signerOptions = env.signers.map((s, i) =>
+      `<option value="${s.id}" ${i === 0 ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('');
+    const typeButtons = Object.keys(FIELD_DEFAULTS).map(t =>
+      `<button class="tab-btn field-type-btn ${t === 'signature' ? 'active' : ''}" data-type="${t}">${FIELD_DEFAULTS[t].label}</button>`).join('');
+
+    const pagesHtml = pageImages.length
+      ? pageImages.map((src, i) => `
+        <div class="field-page" data-page-index="${i}" style="position:relative; display:block; margin:0 auto 16px; max-width:700px;">
+          <img src="${src}" style="display:block; width:100%; border:1px solid var(--paper-line);" draggable="false">
+          <div class="field-overlay" data-page-index="${i}" style="position:absolute; inset:0; cursor:crosshair;"></div>
+        </div>`).join('')
+      : `<div class="doc-fallback">Preview unavailable</div>`;
+
+    return `<div class="page-card">
+      <h2 class="section-title">Place fields</h2>
+      <p class="muted" style="margin-bottom:6px;"><strong>${escapeHtml(env.title)}</strong></p>
+      <p class="faint" style="margin-bottom:18px;">Pick a signer and a field type below, then click anywhere on the document to place it. Click a placed field to remove it.</p>
+      <div class="upload-tabs" style="align-items:center; gap:14px;">
+        <select id="fieldSignerSelect" style="padding:8px 10px; border:1.5px solid var(--paper-line); border-radius:4px; font-size:13.5px;">${signerOptions}</select>
+        <div style="display:flex; gap:8px;">${typeButtons}</div>
+      </div>
+      <div id="fieldEditorError" class="warn-text" style="display:none; margin-top:10px;"></div>
+      <div class="doc-preview" id="fieldPagesContainer" style="margin-top:16px; background:#EFEAE0;">${pagesHtml}</div>
+      <hr class="hr">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <button class="btn btn-ghost" id="btnSaveForLater">Save and finish later</button>
+        <button class="btn btn-primary" id="btnFinishSend">Finish &amp; send</button>
+      </div>
+    </div>`;
+  }
+
+  async function refreshFieldOverlays() {
+    let fields;
+    try { fields = await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields'); } catch (e) { return; }
+    const bySigner = {};
+    fieldEditorState.signers.forEach((s, i) => { bySigner[s.id] = { name: s.name, color: SIGNER_COLORS[i % SIGNER_COLORS.length] }; });
+    app.querySelectorAll('.field-overlay').forEach(layer => {
+      const pageIdx = Number(layer.getAttribute('data-page-index'));
+      const onPage = fields.filter(f => f.page_index === pageIdx);
+      layer.innerHTML = onPage.map(f => {
+        const info = bySigner[f.signer_id] || { name: '?', color: '#888' };
+        const label = FIELD_DEFAULTS[f.field_type].label;
+        return `<div class="placed-field" data-field-id="${f.id}" title="Click to remove"
+          style="position:absolute; left:${f.x * 100}%; top:${f.y * 100}%; width:${f.width * 100}%; height:${f.height * 100}%;
+          border:2px dashed ${info.color}; background:${info.color}22; border-radius:3px; cursor:pointer;
+          display:flex; align-items:center; justify-content:center; overflow:hidden;">
+          <span style="font-size:10px; font-weight:700; color:${info.color}; background:#fff; padding:1px 4px; border-radius:3px; white-space:nowrap;">${escapeHtml(info.name.split(' ')[0])} · ${label}</span>
+        </div>`;
+      }).join('');
+    });
+  }
+
+  function wireFieldEditor() {
+    if (!fieldEditorState) return;
+    refreshFieldOverlays();
+
+    document.getElementById('fieldSignerSelect').addEventListener('change', e => { fieldEditorState.activeSignerId = e.target.value; });
+    app.querySelectorAll('.field-type-btn').forEach(btn => btn.addEventListener('click', () => {
+      fieldEditorState.activeType = btn.getAttribute('data-type');
+      app.querySelectorAll('.field-type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }));
+
+    app.querySelectorAll('.field-overlay').forEach(layer => {
+      layer.addEventListener('click', async (e) => {
+        // A click that landed on an existing placed field deletes it instead of creating a new one.
+        const existing = e.target.closest('.placed-field');
+        if (existing) {
+          try { await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields/' + existing.getAttribute('data-field-id'), { method: 'DELETE' }); }
+          catch (err) { /* ignore */ }
+          refreshFieldOverlays();
+          return;
+        }
+        const rect = layer.getBoundingClientRect();
+        const def = FIELD_DEFAULTS[fieldEditorState.activeType];
+        let x = (e.clientX - rect.left) / rect.width - def.width / 2;
+        let y = (e.clientY - rect.top) / rect.height - def.height / 2;
+        x = Math.max(0, Math.min(1 - def.width, x));
+        y = Math.max(0, Math.min(1 - def.height, y));
+        const pageIndex = Number(layer.getAttribute('data-page-index'));
+        try {
+          await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/fields', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ signer_id: fieldEditorState.activeSignerId, field_type: fieldEditorState.activeType, page_index: pageIndex, x, y, width: def.width, height: def.height })
+          });
+          refreshFieldOverlays();
+        } catch (err) {
+          const errBox = document.getElementById('fieldEditorError');
+          errBox.textContent = err.message || 'Could not place that field.'; errBox.style.display = 'block';
+        }
+      });
+    });
+
+    document.getElementById('btnSaveForLater').addEventListener('click', () => { STATE.screen = 'list'; render(); });
+    document.getElementById('btnFinishSend').addEventListener('click', async () => {
+      const btn = document.getElementById('btnFinishSend');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        await api('/sealwright/api/envelopes/' + fieldEditorState.envelope.id + '/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        STATE.currentId = fieldEditorState.envelope.id;
+        STATE.screen = 'detail';
+        render();
+      } catch (err) {
+        const errBox = document.getElementById('fieldEditorError');
+        errBox.textContent = err.message || 'Could not send the envelope.'; errBox.style.display = 'block';
+        btn.disabled = false; btn.textContent = 'Finish & send';
+      }
+    });
   }
 
   // ---------------- detail / tracking ----------------
@@ -380,7 +547,13 @@
 
   window.addEventListener('click', (e) => {
     const row = e.target.closest('.env-row');
-    if (row && STATE.screen === 'list') { STATE.currentId = row.getAttribute('data-id'); STATE.screen = 'detail'; render(); }
+    if (row && STATE.screen === 'list') {
+      const id = row.getAttribute('data-id');
+      const env = STATE.envelopes.find(x => x.id === id);
+      STATE.currentId = id;
+      STATE.screen = (env && env.status === 'preparing') ? 'field-editor' : 'detail';
+      render();
+    }
   });
 
   render();
