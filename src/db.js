@@ -91,6 +91,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
   text TEXT NOT NULL
 );
 
+-- Drag-and-drop placed fields (currently offered for Word-document envelopes
+-- only — see src/pdf.js for why: it reuses the existing, already-tested docx
+-- text-reflow layout as the shared coordinate system between the placement
+-- editor and the final stamped PDF, rather than adding a heavy docx-to-PDF
+-- rendering dependency like LibreOffice or headless Chromium).
+CREATE TABLE IF NOT EXISTS envelope_fields (
+  id UUID PRIMARY KEY,
+  envelope_id UUID NOT NULL REFERENCES envelopes(id) ON DELETE CASCADE,
+  signer_id UUID NOT NULL REFERENCES signers(id) ON DELETE CASCADE,
+  field_type TEXT NOT NULL, -- 'signature' | 'initial' | 'date' | 'checkbox'
+  page_index INTEGER NOT NULL,
+  x REAL NOT NULL,      -- fraction of page width, 0-1, left edge
+  y REAL NOT NULL,      -- fraction of page height, 0-1, TOP edge (converted at stamp time)
+  width REAL NOT NULL,  -- fraction of page width
+  height REAL NOT NULL, -- fraction of page height
+  filled_image_bytes BYTEA,
+  filled_image_mime TEXT,
+  filled_text TEXT,
+  filled_bool BOOLEAN,
+  filled_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_signers_envelope ON signers(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_pages_envelope ON envelope_pages(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_audit_envelope ON audit_log(envelope_id);
@@ -98,6 +120,8 @@ CREATE INDEX IF NOT EXISTS idx_signers_token ON signers(sign_token);
 CREATE INDEX IF NOT EXISTS idx_envelopes_owner ON envelopes(owner_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token);
+CREATE INDEX IF NOT EXISTS idx_fields_envelope ON envelope_fields(envelope_id);
+CREATE INDEX IF NOT EXISTS idx_fields_signer ON envelope_fields(signer_id);
 `;
 
 async function ensureSchema() {
