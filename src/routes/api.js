@@ -46,6 +46,23 @@ async function senderDisplayName(ownerId) {
   return name || null;
 }
 
+async function getSavedSignature(email) {
+  const r = await pool.query('SELECT * FROM saved_signatures WHERE email=$1', [String(email).trim().toLowerCase()]);
+  return r.rows[0] || null;
+}
+
+// kind: 'signature' | 'initial'
+async function upsertSavedSignature(email, kind, bytes, mime) {
+  const normalized = String(email).trim().toLowerCase();
+  const col = kind === 'initial' ? 'initial_bytes' : 'signature_bytes';
+  const mimeCol = kind === 'initial' ? 'initial_mime' : 'signature_mime';
+  await pool.query(
+    `INSERT INTO saved_signatures (email, ${col}, ${mimeCol}, updated_at) VALUES ($1,$2,$3,now())
+     ON CONFLICT (email) DO UPDATE SET ${col}=$2, ${mimeCol}=$3, updated_at=now()`,
+    [normalized, bytes, mime]
+  );
+}
+
 async function emailSignerTurn(req, envelope, signer, senderName) {
   const link = `${baseUrl(req)}/sealwright/sign/${signer.sign_token}`;
   const t = signRequestEmail({ signerName: signer.name, envelopeTitle: envelope.title, senderName, signUrl: link });
@@ -231,6 +248,24 @@ router.delete('/envelopes/:id/fields/:fieldId', async (req, res) => {
   res.json({ deleted: true });
 });
 
+router.patch('/envelopes/:id/fields/:fieldId', express.json(), async (req, res) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env || env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
+  if (env.status !== 'preparing') return res.status(400).json({ error: 'Fields can only be edited before sending' });
+  const fieldRes = await pool.query('SELECT * FROM envelope_fields WHERE id=$1 AND envelope_id=$2', [req.params.fieldId, env.id]);
+  const field = fieldRes.rows[0];
+  if (!field) return res.status(404).json({ error: 'Not found' });
+  // Re-clamp server-side too — the client already keeps the box on the page
+  // during the drag, but this is the actual source of truth for the value
+  // that ends up in the final PDF, so it shouldn't blindly trust the client.
+  const x = Math.max(0, Math.min(1 - field.width, Number(req.body.x)));
+  const y = Math.max(0, Math.min(1 - field.height, Number(req.body.y)));
+  if (Number.isNaN(x) || Number.isNaN(y)) return res.status(400).json({ error: 'Invalid position' });
+  await pool.query('UPDATE envelope_fields SET x=$1, y=$2 WHERE id=$3', [x, y, field.id]);
+  res.json({ x, y });
+});
+
 router.post('/envelopes/:id/send', express.json(), async (req, res) => {
   if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
   const env = await loadEnvelopeRow(req.params.id);
@@ -392,11 +427,13 @@ router.get('/sign/:token/context', async (req, res) => {
   const pages = await loadPages(env.id);
   const fieldsRes = await pool.query('SELECT * FROM envelope_fields WHERE envelope_id=$1 ORDER BY page_index, y', [env.id]);
   const myTurn = !env.sequential || signer.order_index === env.current_turn_index;
+  const saved = await getSavedSignature(signer.email);
   res.json({
     envelope: { id: env.id, title: env.title, source_type: env.source_type, file_name: env.file_name, sequential: env.sequential, status: env.status, page_count: pages.length },
     you: { id: signer.id, name: signer.name, email: signer.email, order_index: signer.order_index, status: signer.status },
     myTurn,
     hasFields: fieldsRes.rows.length > 0,
+    savedSignature: { hasSignature: !!(saved && saved.signature_bytes), hasInitial: !!(saved && saved.initial_bytes) },
     fields: fieldsRes.rows.map(f => ({
       id: f.id, signer_id: f.signer_id, field_type: f.field_type, page_index: f.page_index,
       x: f.x, y: f.y, width: f.width, height: f.height,
@@ -404,6 +441,19 @@ router.get('/sign/:token/context', async (req, res) => {
     })),
     signers: signers.map(s => ({ id: s.id, name: s.name, email: s.email, order_index: s.order_index, status: s.status, signed_at: s.signed_at, has_signature: !!s.signature_bytes }))
   });
+});
+
+router.get('/sign/:token/saved-image', async (req, res) => {
+  const sr = await pool.query('SELECT * FROM signers WHERE sign_token=$1', [req.params.token]);
+  const signer = sr.rows[0];
+  if (!signer) return res.status(404).end();
+  const saved = await getSavedSignature(signer.email);
+  const kind = req.query.type === 'initial' ? 'initial' : 'signature';
+  const bytes = saved && (kind === 'initial' ? saved.initial_bytes : saved.signature_bytes);
+  if (!bytes) return res.status(404).end();
+  const mime = kind === 'initial' ? saved.initial_mime : saved.signature_mime;
+  res.setHeader('Content-Type', mime || 'image/png');
+  res.send(bytes);
 });
 
 async function finishSignerTurn(req, client, env, signer) {
@@ -475,14 +525,28 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
       return res.status(403).json({ error: 'It is not your turn yet' });
     }
     if (req.body.consent !== 'true') return res.status(400).json({ error: 'Consent is required' });
-    if (!req.file) return res.status(400).json({ error: 'No signature provided' });
+
+    let sigBytes, sigMime, method;
+    if (req.file) {
+      sigBytes = req.file.buffer; sigMime = req.file.mimetype; method = req.body.method || 'drawn';
+    } else if (req.body.useSaved === 'true') {
+      const saved = await getSavedSignature(signer.email);
+      if (!saved || !saved.signature_bytes) return res.status(400).json({ error: 'No saved signature on file' });
+      sigBytes = saved.signature_bytes; sigMime = saved.signature_mime; method = 'saved signature';
+    } else {
+      return res.status(400).json({ error: 'No signature provided' });
+    }
 
     await client.query('BEGIN');
     await client.query(
       `UPDATE signers SET status='signed', signed_at=now(), signature_bytes=$1, signature_mime=$2, method=$3 WHERE id=$4`,
-      [req.file.buffer, req.file.mimetype, req.body.method || 'drawn', signer.id]
+      [sigBytes, sigMime, method, signer.id]
     );
-    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, `${signer.name} signed via ${req.body.method || 'electronic signature'}.`]);
+    await client.query('INSERT INTO audit_log (id, envelope_id, text) VALUES ($1,$2,$3)', [crypto.randomUUID(), env.id, `${signer.name} signed via ${method}.`]);
+
+    if (req.body.saveForFuture === 'true') {
+      upsertSavedSignature(signer.email, 'signature', sigBytes, sigMime).catch(e => console.error('save signature failed', e.message));
+    }
 
     const result = await finishSignerTurn(req, client, env, signer);
     res.json({ status: 'signed', allSigned: result.allSigned });
@@ -517,13 +581,23 @@ router.post('/sign/:token/fields', upload.any(), async (req, res) => {
 
     const filesByName = {};
     for (const f of (req.files || [])) filesByName[f.fieldname] = f;
+    const saved = await getSavedSignature(signer.email);
+    let newSignature = null, newInitial = null; // track newly-drawn values, for saveForFuture below
 
     await client.query('BEGIN');
     for (const field of myFields) {
       if (field.field_type === 'signature' || field.field_type === 'initial') {
         const file = filesByName['image_' + field.id];
-        if (!file) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Please fill every ${field.field_type} field` }); }
-        await client.query('UPDATE envelope_fields SET filled_image_bytes=$1, filled_image_mime=$2, filled_at=now() WHERE id=$3', [file.buffer, file.mimetype, field.id]);
+        let bytes, mime;
+        if (file) {
+          bytes = file.buffer; mime = file.mimetype;
+          if (field.field_type === 'signature') newSignature = { bytes, mime }; else newInitial = { bytes, mime };
+        } else if (req.body['useSaved_' + field.id] === 'true' && saved) {
+          bytes = field.field_type === 'initial' ? saved.initial_bytes : saved.signature_bytes;
+          mime = field.field_type === 'initial' ? saved.initial_mime : saved.signature_mime;
+        }
+        if (!bytes) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Please fill every ${field.field_type} field` }); }
+        await client.query('UPDATE envelope_fields SET filled_image_bytes=$1, filled_image_mime=$2, filled_at=now() WHERE id=$3', [bytes, mime, field.id]);
       } else if (field.field_type === 'date') {
         const text = (req.body['text_' + field.id] || '').trim();
         if (!text) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Please fill every date field' }); }
@@ -532,6 +606,11 @@ router.post('/sign/:token/fields', upload.any(), async (req, res) => {
         const boolVal = req.body['bool_' + field.id] === 'true';
         await client.query('UPDATE envelope_fields SET filled_bool=$1, filled_at=now() WHERE id=$2', [boolVal, field.id]);
       }
+    }
+
+    if (req.body.saveForFuture === 'true') {
+      if (newSignature) upsertSavedSignature(signer.email, 'signature', newSignature.bytes, newSignature.mime).catch(e => console.error('save signature failed', e.message));
+      if (newInitial) upsertSavedSignature(signer.email, 'initial', newInitial.bytes, newInitial.mime).catch(e => console.error('save initial failed', e.message));
     }
 
     await client.query(`UPDATE signers SET status='signed', signed_at=now(), method=$1 WHERE id=$2`, ['placed fields', signer.id]);
