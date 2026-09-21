@@ -219,7 +219,7 @@ router.get('/envelopes/:id/fields/:fieldId/image', async (req, res) => {
   res.send(r.rows[0].filled_image_bytes);
 });
 
-const FIELD_TYPES = ['signature', 'initial', 'date', 'checkbox'];
+const FIELD_TYPES = ['signature', 'initial', 'date', 'title', 'checkbox'];
 
 router.post('/envelopes/:id/fields', express.json(), async (req, res) => {
   if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
@@ -598,9 +598,9 @@ router.post('/sign/:token/fields', upload.any(), async (req, res) => {
         }
         if (!bytes) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Please fill every ${field.field_type} field` }); }
         await client.query('UPDATE envelope_fields SET filled_image_bytes=$1, filled_image_mime=$2, filled_at=now() WHERE id=$3', [bytes, mime, field.id]);
-      } else if (field.field_type === 'date') {
+      } else if (field.field_type === 'date' || field.field_type === 'title') {
         const text = (req.body['text_' + field.id] || '').trim();
-        if (!text) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Please fill every date field' }); }
+        if (!text) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Please fill every ${field.field_type} field` }); }
         await client.query('UPDATE envelope_fields SET filled_text=$1, filled_at=now() WHERE id=$2', [text, field.id]);
       } else if (field.field_type === 'checkbox') {
         const boolVal = req.body['bool_' + field.id] === 'true';
