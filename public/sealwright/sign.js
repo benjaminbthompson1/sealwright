@@ -13,7 +13,7 @@
   let sessionFillCache = { signature: null, initial: null }; // {kind:'useSaved'} | {kind:'image', blob, previewUrl}
 
   // ---------------- field-based fill-in view ----------------
-  const FIELD_LABELS = { signature: 'Signature', initial: 'Initials', date: 'Date', checkbox: 'Checkbox' };
+  const FIELD_LABELS = { signature: 'Signature', initial: 'Initials', date: 'Date', title: 'Title', checkbox: 'Checkbox' };
   let fillValues = {}; // { [fieldId]: {kind:'image', blob} | {kind:'text', value} | {kind:'bool', value} }
   let activeFillField = null;
   let fillPadCtx = null, fillPadHasInk = false, fillActiveMethod = 'draw', fillUploadedDataUrl = null;
@@ -70,7 +70,7 @@
     if (f.field_type === 'checkbox') {
       const checked = fillValues[f.id] ? fillValues[f.id].value : f.filled_bool;
       content = checked ? '✕' : '';
-    } else if (f.field_type === 'date') {
+    } else if (f.field_type === 'date' || f.field_type === 'title') {
       content = fillValues[f.id] ? escapeHtml(fillValues[f.id].value) : escapeHtml(f.filled_text || '');
     } else if (f.has_filled_image) {
       content = `<img src="/sealwright/api/envelopes/${ctx.envelope.id}/fields/${f.id}/image?token=${TOKEN}" style="max-width:100%; max-height:100%;">`;
@@ -110,20 +110,25 @@
   function openFillPanel(fieldId, fieldType, env, you, myFields, forceFullPanel) {
     activeFillField = fieldId;
     const host = document.getElementById('fillPanelHost');
+    const currentField = myFields.find(f => f.id === fieldId);
     if (fieldType === 'checkbox') {
       const current = fillValues[fieldId] ? fillValues[fieldId].value : false;
       fillValues[fieldId] = { kind: 'bool', value: !current };
       renderFieldFillView(env, you); // cheap full refresh; keeps this simple and correct
       return;
     }
-    if (fieldType === 'date') {
+    if (fieldType === 'date' || fieldType === 'title') {
+      const isDate = fieldType === 'date';
+      const heading = isDate ? 'Enter a date' : 'Enter your title';
+      const placeholder = isDate ? 'MM/DD/YYYY' : 'e.g. Chief Executive Officer';
+      const defaultValue = fillValues[fieldId] ? fillValues[fieldId].value : (isDate ? todayLabel() : '');
       host.innerHTML = `<div class="sig-block is-active" style="margin-top:14px;">
-        <div style="font-weight:600; margin-bottom:8px;">Enter a date</div>
-        <input type="text" id="dateFillInput" placeholder="MM/DD/YYYY" value="${fillValues[fieldId] ? escapeHtml(fillValues[fieldId].value) : todayLabel()}" style="padding:9px 12px; border:1.5px solid var(--paper-line); border-radius:4px; font-size:14px; width:200px;">
-        <div style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="btnSaveDate">Use this date</button> <button class="btn btn-ghost btn-sm" id="btnCancelFill">Cancel</button></div>
+        <div style="font-weight:600; margin-bottom:8px;">${heading}</div>
+        <input type="text" id="textFillInput" placeholder="${placeholder}" value="${escapeHtml(defaultValue)}" style="padding:9px 12px; border:1.5px solid var(--paper-line); border-radius:4px; font-size:14px; width:260px;">
+        <div style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="btnSaveText">Use this</button> <button class="btn btn-ghost btn-sm" id="btnCancelFill">Cancel</button></div>
       </div>`;
-      document.getElementById('btnSaveDate').addEventListener('click', () => {
-        const val = document.getElementById('dateFillInput').value.trim();
+      document.getElementById('btnSaveText').addEventListener('click', () => {
+        const val = document.getElementById('textFillInput').value.trim();
         if (!val) return;
         fillValues[fieldId] = { kind: 'text', value: val };
         host.innerHTML = '';
@@ -230,7 +235,12 @@
       else if (fillActiveMethod === 'type') {
         const text = document.getElementById('fillTypedName').value.trim();
         try { await document.fonts.load(`40px 'Dancing Script'`); } catch (e) {}
-        dataUrl = renderTypedSignatureImage(text, "'Dancing Script', cursive");
+        // 612x792 matches the fixed docx page size used everywhere else in
+        // the app (src/pdf.js) — converting the field's stored fraction
+        // width/height into points gives the real box shape to render into.
+        const boxWpt = currentField ? currentField.width * 612 : null;
+        const boxHpt = currentField ? currentField.height * 792 : null;
+        dataUrl = renderTypedSignatureImage(text, "'Dancing Script', cursive", boxWpt, boxHpt);
       } else dataUrl = fillUploadedDataUrl;
       fillValues[fieldId] = { kind: 'image', blob: dataUrlToBlob(dataUrl), previewUrl: dataUrl };
       sessionFillCache[cacheKey] = fillValues[fieldId];
@@ -448,13 +458,30 @@
     }
   }
 
-  function renderTypedSignatureImage(text, font) {
+  function renderTypedSignatureImage(text, font, boxWidthPts, boxHeightPts) {
+    // Match the canvas's aspect ratio to the actual field it'll be stamped
+    // into — a fixed canvas shape scaled to fit a much smaller/narrower box
+    // (like initials) shrinks the text far more than into a signature box,
+    // which is why initials were coming out nearly unreadable before this.
+    const ratio = (boxWidthPts && boxHeightPts) ? (boxWidthPts / boxHeightPts) : (480 / 150);
+    const canvasH = 200;
+    const canvasW = Math.max(80, Math.round(canvasH * ratio));
     const canvas = document.createElement('canvas');
-    canvas.width = 480; canvas.height = 150;
+    canvas.width = canvasW; canvas.height = canvasH;
     const c = canvas.getContext('2d');
     c.fillStyle = '#fff'; c.fillRect(0, 0, canvas.width, canvas.height);
-    c.fillStyle = '#1C2B3A'; c.font = `52px ${font}`; c.textBaseline = 'middle';
-    c.fillText(text, 16, canvas.height / 2);
+    c.fillStyle = '#1C2B3A'; c.textBaseline = 'middle';
+    // Font size is a fixed proportion of canvas height, so it reads at a
+    // consistent, comfortable size no matter which field type it lands in —
+    // then shrinks further only if this particular text is too wide to fit.
+    let size = Math.round(canvasH * 0.5);
+    c.font = `${size}px ${font}`;
+    const maxWidth = canvasW - 20;
+    while (size > 10 && c.measureText(text).width > maxWidth) {
+      size -= 2;
+      c.font = `${size}px ${font}`;
+    }
+    c.fillText(text, 10, canvas.height / 2);
     return canvas.toDataURL('image/png');
   }
 
