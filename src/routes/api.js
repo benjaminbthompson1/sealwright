@@ -6,7 +6,7 @@ const { pool } = require('../db');
 const { sendMail } = require('../mailer');
 const { buildFinalPdf, buildDocxDraftPdf } = require('../pdf');
 const { findUserById } = require('../auth');
-const { signRequestEmail, completionEmail } = require('../emailTemplates');
+const { signRequestEmail, completionEmail, cancelledEmail } = require('../emailTemplates');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -378,6 +378,35 @@ router.delete('/envelopes/:id', async (req, res) => {
   res.json({ deleted: true });
 });
 
+// Cancel is deliberately different from delete: the record, audit trail, and
+// any signatures already collected all stay — only the ability to keep
+// signing it stops. Signers who already have the link open get a real,
+// server-side block (see the guards in the signing endpoints below), not
+// just a UI that hides the button.
+router.post('/envelopes/:id/cancel', express.json(), async (req, res) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  const env = await loadEnvelopeRow(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Not found' });
+  if (env.owner_id !== req.session.userId) return res.status(403).json({ error: 'Not authorized' });
+  if (env.status !== 'sent' && env.status !== 'preparing') {
+    return res.status(400).json({ error: 'Only an in-progress envelope can be cancelled' });
+  }
+  await pool.query(`UPDATE envelopes SET status='cancelled' WHERE id=$1`, [env.id]);
+  await addAudit(env.id, 'Envelope cancelled by the sender.');
+
+  const signers = await loadSigners(env.id);
+  const senderName = await senderDisplayName(req.session.userId);
+  for (const s of signers) {
+    cancelledEmailIfPossible(s, env, senderName);
+  }
+  res.json({ status: 'cancelled' });
+});
+
+function cancelledEmailIfPossible(signer, env, senderName) {
+  const t = cancelledEmail({ recipientName: signer.name, envelopeTitle: env.title, senderName });
+  sendMail({ to: signer.email, subject: t.subject, text: t.text, html: t.html }).catch(e => console.error('cancellation email failed', e.message));
+}
+
 // ---------- file / page / signature serving ----------
 router.get('/envelopes/:id/file', async (req, res) => {
   const access = await resolveAccess(req, req.params.id);
@@ -521,6 +550,7 @@ router.post('/sign/:token', upload.single('signature'), async (req, res) => {
 
     const envRes = await client.query('SELECT * FROM envelopes WHERE id=$1 FOR UPDATE', [signer.envelope_id]);
     const env = envRes.rows[0];
+    if (env.status === 'cancelled') return res.status(410).json({ error: 'This envelope has been cancelled by the sender' });
     if (env.sequential && signer.order_index !== env.current_turn_index) {
       return res.status(403).json({ error: 'It is not your turn yet' });
     }
@@ -570,6 +600,7 @@ router.post('/sign/:token/fields', upload.any(), async (req, res) => {
 
     const envRes = await client.query('SELECT * FROM envelopes WHERE id=$1 FOR UPDATE', [signer.envelope_id]);
     const env = envRes.rows[0];
+    if (env.status === 'cancelled') return res.status(410).json({ error: 'This envelope has been cancelled by the sender' });
     if (env.sequential && signer.order_index !== env.current_turn_index) {
       return res.status(403).json({ error: 'It is not your turn yet' });
     }
