@@ -169,7 +169,23 @@ function accountUpdatedEmail({ firstName, changes, forgotPasswordUrl }) {
   return { subject, html, text };
 }
 
+// ---------- 7. Envelope cancelled ----------
+function cancelledEmail({ recipientName, envelopeTitle, senderName }) {
+  const subject = `Cancelled: ${envelopeTitle}`;
+  const who = senderName ? escapeHtml(senderName) : 'The sender';
+  const html = layout({
+    preheader: `${who} has cancelled "${envelopeTitle}" — no action needed`,
+    bodyHtml: `
+      <p style="margin:0 0 16px;">Hi ${greetName(recipientName)},</p>
+      <p style="margin:0 0 16px;">${who} has cancelled <strong>${escapeHtml(envelopeTitle)}</strong>. No further action is needed — any signing link you received for this document is no longer valid.</p>
+    `
+  });
+  const text = `Hi ${recipientName || 'there'},\n\n${senderName || 'The sender'} has cancelled "${envelopeTitle}". No further action is needed — any signing link you received for this document is no longer valid.`;
+  return { subject, html, text };
+}
+
 module.exports = {
   welcomeEmail, signRequestEmail, completionEmail,
-  resetPasswordLinkEmail, passwordChangedEmail, accountUpdatedEmail
+  resetPasswordLinkEmail, passwordChangedEmail, accountUpdatedEmail,
+  cancelledEmail
 };
