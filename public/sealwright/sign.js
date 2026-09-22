@@ -304,8 +304,17 @@
     return `<div class="topbar"><div class="brand">${sealSvg(44)}<div class="brand-text"><h1>Sealwright</h1><div class="tag">Where agreements become official</div></div></div></div>`;
   }
 
+  function renderCancelledView(env, you) {
+    app.innerHTML = `${topbar()}<div class="page-card">
+      <h2 class="section-title">${escapeHtml(env.title)}</h2>
+      <p class="faint" style="margin-bottom:14px;">Viewing as ${escapeHtml(you.name)}</p>
+      <div class="banner banner-warn"><strong>This document has been cancelled.</strong> The sender cancelled this envelope — no signature is needed, and this link can no longer be used to sign.</div>
+    </div>`;
+  }
+
   function render() {
     const env = ctx.envelope, you = ctx.you;
+    if (env.status === 'cancelled') { renderCancelledView(env, you); return; }
     if (ctx.hasFields) { renderFieldFillView(env, you); return; }
     const blocks = ctx.signers.map(s => {
       const isYou = s.id === you.id;
