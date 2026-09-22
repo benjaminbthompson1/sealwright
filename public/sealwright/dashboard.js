@@ -63,13 +63,21 @@
         let cls = 'dot'; if (s.status === 'signed') cls += ' signed'; else if (env.sequential && s.order_index === env.current_turn_index) cls += ' turn';
         return `<span class="${cls}" title="${escapeHtml(s.name)}"></span>`;
       }).join('');
-      const badge = env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : env.status === 'preparing' ? '<span class="badge badge-progress">Draft — placing fields</span>' : '<span class="badge badge-progress">In progress</span>';
+      let badge;
+      if (env.status === 'completed') badge = '<span class="badge badge-done">Completed</span>';
+      else if (env.status === 'cancelled') badge = '<span class="badge" style="background:#EFEAE0; color:var(--ink-faint);">Cancelled</span>';
+      else if (env.status === 'preparing') badge = '<span class="badge badge-progress">Draft — placing fields</span>';
+      else badge = '<span class="badge badge-progress">In progress</span>';
       const recipientBadge = env.is_owner === false ? '<span class="badge" style="background:var(--brass-tint); color:var(--brass);">Sent to you</span>' : '';
+      const cancelBtn = (env.is_owner && (env.status === 'sent' || env.status === 'preparing'))
+        ? `<button class="btn btn-ghost btn-sm row-action-btn" data-action="cancel" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Cancel</button>` : '';
+      const deleteBtn = env.is_owner
+        ? `<button class="btn btn-danger btn-sm row-action-btn" data-action="delete" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete</button>` : '';
       return `<div class="env-row" data-id="${env.id}">
         <div class="env-row-main"><h3>${escapeHtml(env.title)}</h3>
           <div class="faint">${env.signers.length} signer${env.signers.length === 1 ? '' : 's'} · created ${formatDateTime(env.created_at)}</div>
           <div class="env-progress">${dots}<span class="faint" style="margin-left:6px;">${signedCount}/${env.signers.length} signed</span></div>
-        </div><div style="display:flex; gap:6px; align-items:flex-start;">${recipientBadge}${badge}</div></div>`;
+        </div><div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">${recipientBadge}${badge}${cancelBtn}${deleteBtn}</div></div>`;
     }).join('');
     return `<div class="env-list">${rows}</div>`;
   }
@@ -547,6 +555,7 @@
     const rows = env.signers.map((s, i) => {
       let status, link = '';
       if (s.status === 'signed') status = `<span class="sig-status signed">Signed ${formatDateTime(s.signed_at)}</span>`;
+      else if (env.status === 'cancelled') status = `<span class="sig-status waiting">Cancelled</span>`;
       else if (!env.sequential || s.order_index === env.current_turn_index) {
         status = `<span class="sig-status pending">Ready to sign</span>`;
         link = s.sign_token ? `<button class="btn btn-sm btn-ghost" data-copy="${location.origin}/sealwright/sign/${s.sign_token}">Copy signing link</button>` : '';
@@ -562,21 +571,30 @@
       <div class="banner banner-info" style="margin-top:22px;"><strong>Document executed.</strong> All parties have signed.
       ${env.fingerprint ? `<div class="fingerprint" style="margin-top:8px;">SHA-256 fingerprint: ${env.fingerprint}</div>` : ''}</div>
       <div style="margin-top:14px;"><a class="btn btn-primary" href="/sealwright/api/envelopes/${env.id}/download">Download executed document</a></div>` : '';
-    const deleteSection = env.is_owner ? `
+    const cancelledBlock = env.status === 'cancelled' ? `
+      <div class="banner banner-warn" style="margin-top:22px;"><strong>Envelope cancelled.</strong> Signers can no longer sign this document.</div>` : '';
+    const manageSection = env.is_owner ? `
       <hr class="hr">
       <div id="deleteError" class="warn-text" style="display:none;"></div>
-      <button class="btn btn-danger btn-sm" id="btnDeleteEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete this envelope</button>
-      <p class="faint" style="margin-top:8px;">Permanently removes the document, every signature, and the activity log. This cannot be undone.</p>` : '';
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        ${(env.status === 'sent' || env.status === 'preparing') ? `<button class="btn btn-ghost btn-sm" id="btnCancelEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Cancel this envelope</button>` : ''}
+        <button class="btn btn-danger btn-sm" id="btnDeleteEnvelope" data-id="${env.id}" data-title="${escapeHtml(env.title)}">Delete this envelope</button>
+      </div>
+      <p class="faint" style="margin-top:8px;">Cancel stops signing but keeps the record. Delete permanently removes the document, every signature, and the activity log. Both cannot be undone.</p>` : '';
     setTimeout(() => loadDetailPreview(env), 0);
+    let headerBadge;
+    if (env.status === 'completed') headerBadge = '<span class="badge badge-done">Completed</span>';
+    else if (env.status === 'cancelled') headerBadge = '<span class="badge" style="background:#EFEAE0; color:var(--ink-faint);">Cancelled</span>';
+    else headerBadge = '<span class="badge badge-progress">In progress</span>';
     return `<div class="page-card">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
         <div><h2 class="section-title">${escapeHtml(env.title)}</h2><p class="faint">Created ${formatDateTime(env.created_at)} · ${env.sequential ? 'Sequential' : 'Parallel'} routing${env.is_owner === false ? ' · Sent to you' : ''}</p></div>
-        ${env.status === 'completed' ? '<span class="badge badge-done">Completed</span>' : '<span class="badge badge-progress">In progress</span>'}
+        ${headerBadge}
       </div>
       <div class="doc-preview" id="detailPreview" style="margin-top:18px;">${preview}</div>
       <h3 style="margin-top:26px; font-size:16px;">Signers</h3><div class="sig-block-panel">${rows}</div>
-      ${completedBlock}<hr class="hr"><h3 style="font-size:16px;">Activity</h3><div class="audit-log">${auditRows}</div>
-      ${deleteSection}
+      ${completedBlock}${cancelledBlock}<hr class="hr"><h3 style="font-size:16px;">Activity</h3><div class="audit-log">${auditRows}</div>
+      ${manageSection}
     </div>`;
   }
 
@@ -621,9 +639,41 @@
         btnDelete.disabled = false; btnDelete.textContent = 'Delete this envelope';
       }
     });
+    const btnCancel = document.getElementById('btnCancelEnvelope');
+    if (btnCancel) btnCancel.addEventListener('click', async () => {
+      const title = btnCancel.getAttribute('data-title');
+      if (!confirm(`Cancel "${title}"? Signers will no longer be able to sign it, and anyone who already received it will be notified it was cancelled. This cannot be undone.`)) return;
+      btnCancel.disabled = true; btnCancel.textContent = 'Cancelling…';
+      try {
+        await api('/sealwright/api/envelopes/' + btnCancel.getAttribute('data-id') + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        render();
+      } catch (e) {
+        const errBox = document.getElementById('deleteError');
+        errBox.textContent = e.message || 'Could not cancel this envelope.'; errBox.style.display = 'block';
+        btnCancel.disabled = false; btnCancel.textContent = 'Cancel this envelope';
+      }
+    });
   }
 
-  window.addEventListener('click', (e) => {
+  window.addEventListener('click', async (e) => {
+    const actionBtn = e.target.closest('.row-action-btn');
+    if (actionBtn) {
+      e.stopPropagation();
+      const id = actionBtn.getAttribute('data-id');
+      const title = actionBtn.getAttribute('data-title');
+      const action = actionBtn.getAttribute('data-action');
+      if (action === 'delete') {
+        if (!confirm(`Delete "${title}"? This permanently removes the document, every signature, and the activity log. This cannot be undone.`)) return;
+        try { await api('/sealwright/api/envelopes/' + id, { method: 'DELETE' }); }
+        catch (err) { alert(err.message || 'Could not delete this envelope.'); return; }
+      } else if (action === 'cancel') {
+        if (!confirm(`Cancel "${title}"? Signers will no longer be able to sign it, and anyone who already received it will be notified it was cancelled. This cannot be undone.`)) return;
+        try { await api('/sealwright/api/envelopes/' + id + '/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+        catch (err) { alert(err.message || 'Could not cancel this envelope.'); return; }
+      }
+      if (STATE.screen === 'list') render();
+      return;
+    }
     const row = e.target.closest('.env-row');
     if (row && STATE.screen === 'list') {
       const id = row.getAttribute('data-id');
