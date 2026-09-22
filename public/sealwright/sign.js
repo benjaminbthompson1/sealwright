@@ -69,9 +69,10 @@
     let content = '';
     if (f.field_type === 'checkbox') {
       const checked = fillValues[f.id] ? fillValues[f.id].value : f.filled_bool;
-      content = checked ? '✕' : '';
+      content = checked ? `<span style="font-size:12px; color:${color}; line-height:1;">✕</span>` : '';
     } else if (f.field_type === 'date' || f.field_type === 'title') {
-      content = fillValues[f.id] ? escapeHtml(fillValues[f.id].value) : escapeHtml(f.filled_text || '');
+      const text = fillValues[f.id] ? fillValues[f.id].value : (f.filled_text || '');
+      content = `<span style="font-size:10px; color:${color}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; padding:0 2px;">${escapeHtml(text)}</span>`;
     } else if (f.has_filled_image) {
       content = `<img src="/sealwright/api/envelopes/${ctx.envelope.id}/fields/${f.id}/image?token=${TOKEN}" style="max-width:100%; max-height:100%;">`;
     } else if (fillValues[f.id] && fillValues[f.id].kind === 'image') {
