@@ -98,6 +98,11 @@ router.get('/', (req, res) => {
         <h3>Sealwright</h3>
         <p>Multi-party electronic signatures</p>
       </a>
+      <a href="/scanline/" class="app-tile">
+        ${scanlineIcon(44)}
+        <h3>Scanline</h3>
+        <p>Scan documents, receipts &amp; IDs from your camera</p>
+      </a>
       <div class="app-tile app-tile-soon">
         <span class="soon-badge">Coming soon</span>
         <h3>More tools</h3>
@@ -108,7 +113,7 @@ router.get('/', (req, res) => {
     body += `
     <div class="hero">
       <h1>A <span class="accent-text">toolkit</span> of small,<br>focused apps.</h1>
-      <p>One account, a growing set of tools. First up: multi-party electronic signatures with Sealwright.</p>
+      <p>One account, a growing set of tools — multi-party electronic signatures with Sealwright, and document scanning with Scanline.</p>
       <div class="hero-actions">
         <a href="/signup" class="btn btn-primary">Create an account</a>
         <a href="/login" class="btn btn-ghost">Sign in</a>
@@ -127,6 +132,20 @@ function sealwrightIcon(size) {
     <g transform="translate(50,49) rotate(-18)">
       <path d="M-2,-30 C6,-30 11,-20 9,-8 L3,26 L-3,26 L-9,-8 C-11,-20 -8,-30 -2,-30 Z" fill="#F7F4EE" opacity="0.95"/>
     </g>
+  </svg>`;
+}
+
+function scanlineIcon(size) {
+  return `<svg class="app-tile-icon" width="${size}" height="${size}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="scanGradTile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F0B44E"/><stop offset="100%" stop-color="#C97F2B"/>
+    </linearGradient></defs>
+    <rect x="4" y="4" width="92" height="92" rx="20" fill="#1B1D22" stroke="url(#scanGradTile)" stroke-width="2"/>
+    <path d="M26 32h48a4 4 0 0 1 4 4v34" fill="none" stroke="#4B4E58" stroke-width="3" stroke-linecap="round"/>
+    <path d="M22 30 L22 66 A6 6 0 0 0 28 72 L72 72" fill="none" stroke="url(#scanGradTile)" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="28" cy="30" r="3.5" fill="url(#scanGradTile)"/>
+    <circle cx="72" cy="72" r="3.5" fill="url(#scanGradTile)"/>
+    <line x1="34" y1="50" x2="66" y2="50" stroke="#F0B44E" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
   </svg>`;
 }
 
