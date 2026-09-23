@@ -7,6 +7,8 @@ const portalRouter = require('./src/routes/portal');
 const adminRouter = require('./src/routes/admin');
 const pagesRouter = require('./src/routes/pages');
 const apiRouter = require('./src/routes/api');
+const scanlinePagesRouter = require('./src/routes/scanline-pages');
+const scanlineApiRouter = require('./src/routes/scanline-api');
 
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -23,11 +25,11 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
-// Static assets: Toolkit AI's own portal assets, and Sealwright's, kept in
-// separate folders/URL prefixes so a second app can be added later without
-// any filename collisions between apps' CSS/JS.
+// Static assets: Toolkit AI's own portal assets, Sealwright's, and Scanline's,
+// kept in separate folders/URL prefixes so apps never collide on a filename.
 app.use('/portal-assets', express.static(path.join(__dirname, 'public/portal')));
 app.use('/sealwright', express.static(path.join(__dirname, 'public/sealwright')));
+app.use('/scanline', express.static(path.join(__dirname, 'public/scanline')));
 
 app.use(sessionMiddleware());
 app.use(express.json());
@@ -45,6 +47,13 @@ app.use('/sealwright/api', (req, res, next) => {
 });
 app.use('/sealwright/api', apiRouter);
 app.use('/sealwright', pagesRouter);
+
+// Scanline has no public/unauthenticated routes at all (no signer-link style
+// flow), so unlike Sealwright's api above, scanline-api.js gates its whole
+// router itself in one middleware instead of matching routes here.
+app.use('/scanline/api', scanlineApiRouter);
+app.use('/scanline', scanlinePagesRouter);
+
 app.use('/admin', adminRouter);
 app.use('/', portalRouter);
 
