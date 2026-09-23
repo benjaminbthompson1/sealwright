@@ -134,35 +134,6 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token);
 CREATE INDEX IF NOT EXISTS idx_fields_envelope ON envelope_fields(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_fields_signer ON envelope_fields(signer_id);
-
--- ============================================================
--- Scanline: the document-scanner app (second app on the platform,
--- same shared "users" table above — one account, every app).
--- ============================================================
-CREATE TABLE IF NOT EXISTS scanline_documents (
-  id UUID PRIMARY KEY,
-  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  page_order UUID[] NOT NULL DEFAULT '{}', -- ordered list of scanline_document_pages.id
-  password_hash TEXT, -- NULL = not locked; reuses auth.js's scrypt hash format
-  ocr_text TEXT,
-  ocr_generated_at TIMESTAMPTZ,
-  summary_text TEXT,
-  summary_generated_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS scanline_document_pages (
-  id UUID PRIMARY KEY,
-  document_id UUID NOT NULL REFERENCES scanline_documents(id) ON DELETE CASCADE,
-  mime_type TEXT NOT NULL,
-  image_bytes BYTEA NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_scanline_documents_owner ON scanline_documents(owner_id);
-CREATE INDEX IF NOT EXISTS idx_scanline_pages_document ON scanline_document_pages(document_id);
 `;
 
 async function ensureSchema() {
