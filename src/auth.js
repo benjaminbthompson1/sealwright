@@ -1,12 +1,39 @@
-const crypto = require('crypto');
+// ============================================================
+// Sealwright no longer owns accounts. Sign-in, sign-up, profile, password
+// reset and the admin area all live in the Toolkit AI platform service.
+// This file only (1) reads the shared session the platform creates, and
+// (2) looks up a platform user's display info by id (read-only).
+//
+// THE SESSION BLOCK MUST MATCH THE PLATFORM'S src/auth.js sessionMiddleware()
+// in: SESSION_SECRET, cookie name, session table location, cookie path.
+// Same contract as the Scanline service's src/session.js.
+// ============================================================
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
-const { pool } = require('./db');
+const { Pool } = require('pg');
+
+const PLATFORM_SCHEMA = process.env.PLATFORM_SCHEMA || 'platform';
+if (!/^[a-z_][a-z0-9_]*$/i.test(PLATFORM_SCHEMA)) {
+  throw new Error('PLATFORM_SCHEMA must be a plain identifier');
+}
+
+// Separate pool pointed at the PLATFORM schema: used for the session store
+// and for read-only user lookups. db.js's pool stays on Sealwright's schema.
+const platformPool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.PGSSL === 'require' ? { rejectUnauthorized: false } : false,
+  options: `-c search_path=${PLATFORM_SCHEMA},public`
+});
 
 function sessionMiddleware() {
   return session({
-    store: new pgSession({ pool, tableName: 'session', createTableIfMissing: true }),
-    name: 'toolkitai.sid',
+    store: new pgSession({
+      pool: platformPool,
+      schemaName: PLATFORM_SCHEMA,
+      tableName: 'session',
+      createTableIfMissing: false // the platform owns this table
+    }),
+    name: process.env.SESSION_COOKIE_NAME || 'tkai_session',
     secret: process.env.SESSION_SECRET || 'dev-only-insecure-secret',
     resave: false,
     saveUninitialized: false,
@@ -14,158 +41,32 @@ function sessionMiddleware() {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
-      maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
+      maxAge: 1000 * 60 * 60 * 24 * 30
     }
   });
 }
 
-// ---------- password hashing (scrypt — built into Node, no native module to
-// compile, which matters on the Alpine build image) ----------
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(':')) return false;
-  const [salt, hash] = stored.split(':');
-  try {
-    const hashBuffer = Buffer.from(hash, 'hex');
-    const suppliedBuffer = crypto.scryptSync(password, salt, 64);
-    if (hashBuffer.length !== suppliedBuffer.length) return false;
-    return crypto.timingSafeEqual(hashBuffer, suppliedBuffer);
-  } catch (e) {
-    return false;
-  }
-}
-
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
-}
-
-// ---------- user account helpers ----------
-async function findUserByEmail(email) {
-  const r = await pool.query('SELECT * FROM users WHERE email=$1', [String(email).trim().toLowerCase()]);
-  return r.rows[0] || null;
-}
-
+// Schema-qualified on purpose. During the migration window sealwright.users
+// still exists (kept for rollback); an unqualified "users" would silently
+// read that stale copy because Sealwright's search_path puts its own schema first.
 async function findUserById(id) {
-  const r = await pool.query('SELECT * FROM users WHERE id=$1', [id]);
+  if (!id) return null;
+  const r = await platformPool.query(
+    `SELECT id, email, first_name, last_name, phone, is_admin FROM "${PLATFORM_SCHEMA}".users WHERE id=$1`,
+    [id]
+  );
   return r.rows[0] || null;
 }
 
-async function countUsers() {
-  const r = await pool.query('SELECT count(*)::int AS n FROM users');
-  return r.rows[0].n;
-}
-
-async function createUser(email, password, { firstName, lastName, phone } = {}) {
-  const id = crypto.randomUUID();
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const passwordHash = hashPassword(password);
-  await pool.query(
-    'INSERT INTO users (id, email, password_hash, first_name, last_name, phone) VALUES ($1,$2,$3,$4,$5,$6)',
-    [id, normalizedEmail, passwordHash, firstName || null, lastName || null, phone || null]
-  );
-  return { id, email: normalizedEmail };
-}
-
-async function setResetToken(userId) {
-  const token = crypto.randomBytes(32).toString('hex');
-  const expires = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
-  await pool.query('UPDATE users SET reset_token=$1, reset_token_expires=$2 WHERE id=$3', [token, expires, userId]);
-  return token;
-}
-
-async function findUserByValidResetToken(token) {
-  const r = await pool.query('SELECT * FROM users WHERE reset_token=$1 AND reset_token_expires > now()', [token]);
-  return r.rows[0] || null;
-}
-
-async function resetPassword(userId, newPassword) {
-  const passwordHash = hashPassword(newPassword);
-  await pool.query('UPDATE users SET password_hash=$1, reset_token=NULL, reset_token_expires=NULL WHERE id=$2', [passwordHash, userId]);
-}
-
-async function emailTakenByAnotherUser(email, excludeUserId) {
-  const r = await pool.query('SELECT 1 FROM users WHERE email=$1 AND id<>$2', [String(email).trim().toLowerCase(), excludeUserId]);
-  return r.rows.length > 0;
-}
-
-// Shared by both the self-service profile page and the admin edit page — one
-// place validates and applies the update regardless of who's doing it.
-async function updateUserProfile(userId, { firstName, lastName, email, phone }) {
-  const normalizedEmail = String(email).trim().toLowerCase();
-  await pool.query(
-    'UPDATE users SET first_name=$1, last_name=$2, email=$3, phone=$4 WHERE id=$5',
-    [firstName || null, lastName || null, normalizedEmail, phone || null, userId]
-  );
-}
-
-// ---------- one-time migration: envelopes created before accounts existed had
-// no owner. Rather than leave them orphaned forever, the very first account
-// ever created inherits them — there is no ambiguity about whose they were,
-// since nothing had multiple users before this feature existed. ----------
-async function claimOrphanedEnvelopes(userId) {
-  await pool.query('UPDATE envelopes SET owner_id=$1 WHERE owner_id IS NULL', [userId]);
-}
-
-// ---------- admin ----------
-// Runs on every boot; a no-op once an admin already exists. Promotes the
-// earliest-created account rather than requiring anyone to flip a flag by
-// hand — this is what retroactively makes an already-existing account (like
-// one created before this feature existed) the admin with zero extra steps.
-async function ensureFirstAdmin() {
-  const existing = await pool.query('SELECT 1 FROM users WHERE is_admin=true LIMIT 1');
-  if (existing.rows.length) return;
-  await pool.query(`
-    UPDATE users SET is_admin=true
-    WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)
-  `);
-}
-
-async function listAllUsers() {
-  const r = await pool.query(`
-    SELECT u.id, u.email, u.first_name, u.last_name, u.phone, u.is_admin, u.created_at,
-           (SELECT count(*)::int FROM envelopes e WHERE e.owner_id = u.id) AS envelope_count
-    FROM users u
-    ORDER BY u.created_at ASC
-  `);
-  return r.rows;
-}
-
-async function deleteUser(id) {
-  // Cascades to that user's envelopes (and, through those, signers/pages/audit
-  // log) via the existing foreign-key ON DELETE CASCADE chain — no separate
-  // cleanup needed here.
-  await pool.query('DELETE FROM users WHERE id=$1', [id]);
+function loginUrl(nextPath) {
+  const base = process.env.PLATFORM_LOGIN_URL || '/login';
+  return `${base}?next=${encodeURIComponent(nextPath)}`;
 }
 
 function requireAuth(req, res, next) {
   if (req.session && req.session.userId) return next();
-  // req.path is rewritten relative to the mount point inside app.use('/sealwright', ...),
-  // so check the untouched original URL to tell an API call from a page request.
   if (req.originalUrl.includes('/api/')) return res.status(401).json({ error: 'Not authenticated' });
-  return res.redirect('/login');
+  return res.redirect(loginUrl(req.originalUrl));
 }
 
-// Always re-checks is_admin fresh from the database rather than trusting a
-// session flag, since this gates a genuinely sensitive area (every user's
-// data, and account deletion).
-async function requireAdmin(req, res, next) {
-  if (!req.session || !req.session.userId) return res.redirect('/login');
-  const user = await findUserById(req.session.userId);
-  if (!user || !user.is_admin) return res.status(403).send('Not authorized.');
-  req.adminUser = user;
-  next();
-}
-
-module.exports = {
-  sessionMiddleware, requireAuth, requireAdmin, isValidEmail,
-  hashPassword, verifyPassword,
-  findUserByEmail, findUserById, countUsers, createUser,
-  setResetToken, findUserByValidResetToken, resetPassword,
-  claimOrphanedEnvelopes, ensureFirstAdmin, listAllUsers, deleteUser,
-  emailTakenByAnotherUser, updateUserProfile
-};
+module.exports = { sessionMiddleware, requireAuth, findUserById, platformPool };

@@ -19,29 +19,13 @@ const pool = new Pool({
 // statement would fail with "permission denied for database" even when the schema
 // already exists, because Postgres checks the privilege before checking existence.
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  first_name TEXT,
-  last_name TEXT,
-  phone TEXT,
-  is_admin BOOLEAN NOT NULL DEFAULT false,
-  reset_token TEXT,
-  reset_token_expires TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Safe to run against the existing production table: these land as NULL/false
--- for any accounts created before this feature existed, rather than failing.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;
+-- Accounts live in the platform service's schema (platform.users). Sealwright
+-- keeps no users table of its own; owner_id is a plain UUID that refers to a
+-- platform user. There is deliberately no foreign key across schemas.
 
 CREATE TABLE IF NOT EXISTS envelopes (
   id UUID PRIMARY KEY,
-  owner_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  owner_id UUID,
   title TEXT NOT NULL,
   source_type TEXT NOT NULL, -- 'pdf' | 'docx' | 'image'
   file_name TEXT NOT NULL,
@@ -57,10 +41,7 @@ CREATE TABLE IF NOT EXISTS envelopes (
   fingerprint TEXT
 );
 
--- Safe to run against the existing production table: adds the column as NULL
--- for any envelopes created before multi-user accounts existed, rather than
--- failing or requiring the table to be empty.
-ALTER TABLE envelopes ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE envelopes ADD COLUMN IF NOT EXISTS owner_id UUID;
 
 CREATE TABLE IF NOT EXISTS envelope_pages (
   id UUID PRIMARY KEY,
@@ -130,8 +111,6 @@ CREATE INDEX IF NOT EXISTS idx_pages_envelope ON envelope_pages(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_audit_envelope ON audit_log(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_signers_token ON signers(sign_token);
 CREATE INDEX IF NOT EXISTS idx_envelopes_owner ON envelopes(owner_id);
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE INDEX IF NOT EXISTS idx_users_reset_token ON users(reset_token);
 CREATE INDEX IF NOT EXISTS idx_fields_envelope ON envelope_fields(envelope_id);
 CREATE INDEX IF NOT EXISTS idx_fields_signer ON envelope_fields(signer_id);
 `;
