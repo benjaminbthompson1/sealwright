@@ -2,9 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const { pool, ensureSchema } = require('./src/db');
-const { sessionMiddleware, requireAuth, ensureFirstAdmin } = require('./src/auth');
-const portalRouter = require('./src/routes/portal');
-const adminRouter = require('./src/routes/admin');
+const { sessionMiddleware, requireAuth } = require('./src/auth');
 const pagesRouter = require('./src/routes/pages');
 const apiRouter = require('./src/routes/api');
 
@@ -23,20 +21,16 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
-// Static assets: Toolkit AI's own portal assets, and Sealwright's, kept in
-// separate folders/URL prefixes so a second app can be added later without
-// any filename collisions between apps' CSS/JS.
-app.use('/portal-assets', express.static(path.join(__dirname, 'public/portal')));
+// Sealwright is mounted at /sealwright only. Login, signup, profile, password
+// reset and /admin are served by the Toolkit AI platform service at "/".
 app.use('/sealwright', express.static(path.join(__dirname, 'public/sealwright')));
 
 app.use(sessionMiddleware());
 app.use(express.json());
 
-// Sealwright's API lives under /sealwright/api/*. Envelope creation, listing,
-// and deletion must come from a signed-in platform user, never a signer's
-// magic-link token; everything else in api.js (signing, file/signature
-// serving) does its own per-request access check since signers reach those
-// routes without ever having a platform account at all.
+// Envelope creation, listing and deletion require a signed-in platform user.
+// Everything else in api.js (signing, file/signature serving) does its own
+// per-request access check, since signers reach those routes with no account.
 app.use('/sealwright/api', (req, res, next) => {
   if (req.method === 'POST' && req.path === '/envelopes') return requireAuth(req, res, next);
   if (req.method === 'GET' && req.path === '/envelopes') return requireAuth(req, res, next);
@@ -45,17 +39,11 @@ app.use('/sealwright/api', (req, res, next) => {
 });
 app.use('/sealwright/api', apiRouter);
 app.use('/sealwright', pagesRouter);
-app.use('/admin', adminRouter);
-app.use('/', portalRouter);
 
 async function start() {
   try {
     await ensureSchema();
     console.log('Database schema ready.');
-    // No-op once an admin already exists; otherwise promotes the earliest
-    // account, which retroactively makes an account created before this
-    // feature existed the admin, with no manual step required.
-    await ensureFirstAdmin();
   } catch (err) {
     console.error('Failed to prepare database schema:', err.message || err.code || String(err));
     if (err.stack) console.error(err.stack);
